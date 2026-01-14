@@ -223,6 +223,9 @@ export interface Agent {
 
   // Ralph Wiggum mode state
   ralph_state?: RalphLoopState;
+
+  // Message queue state for prompt steering
+  queue_state?: MessageQueueState;
 }
 
 // =============================================================================
@@ -373,7 +376,17 @@ export type RuntimeMessage =
   // Ralph Wiggum Mode (Autonomous Loop)
   | { type: "start_ralph_loop"; agent_id: string; config: RalphLoopConfig }
   | { type: "cancel_ralph_loop"; agent_id: string }
-  | { type: "get_ralph_state"; agent_id: string };
+  | { type: "get_ralph_state"; agent_id: string }
+
+  // Prompt Steering (Message Queue)
+  | { type: "queue_message"; agent_id: string; message: string; priority?: "normal" | "high" }
+  | { type: "send_steer_message"; agent_id: string; message: string }
+  | { type: "clear_queue"; agent_id: string }
+  | { type: "remove_queued_message"; agent_id: string; message_id: string }
+  | { type: "process_queue"; agent_id: string }
+  | { type: "get_queue_state"; agent_id: string }
+  | { type: "set_steer_mode"; agent_id: string; mode: SteerMode }
+  | { type: "interrupt_agent"; agent_id: string };
 
 export type RuntimeResponse =
   | { type: "agent"; agent: Agent }
@@ -388,6 +401,7 @@ export type RuntimeResponse =
   | { type: "git_diff"; diff: string }
   | { type: "validation"; valid: boolean; errors?: string[] }
   | { type: "ralph_state"; state: RalphLoopState | null }
+  | { type: "queue_state"; state: MessageQueueState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -423,7 +437,17 @@ export type RuntimeEvent =
   | { type: "ralph_loop_started"; agent_id: string; state: RalphLoopState }
   | { type: "ralph_loop_iteration"; agent_id: string; state: RalphLoopState }
   | { type: "ralph_loop_completed"; agent_id: string; state: RalphLoopState; reason: "completion_detected" | "max_iterations" | "cancelled" | "error" }
-  | { type: "ralph_loop_error"; agent_id: string; state: RalphLoopState; error: string };
+  | { type: "ralph_loop_error"; agent_id: string; state: RalphLoopState; error: string }
+
+  // Prompt Steering (Message Queue) events
+  | { type: "queue_message_added"; agent_id: string; message: QueuedMessage }
+  | { type: "queue_message_removed"; agent_id: string; message_id: string }
+  | { type: "queue_cleared"; agent_id: string }
+  | { type: "queue_processing_started"; agent_id: string }
+  | { type: "queue_processing_completed"; agent_id: string }
+  | { type: "steer_mode_changed"; agent_id: string; mode: SteerMode }
+  | { type: "agent_interrupted"; agent_id: string }
+  | { type: "steer_message_injected"; agent_id: string; message: string };
 
 // =============================================================================
 // Model Info
@@ -519,5 +543,53 @@ export interface RalphLoopState {
 
   // Error count during the loop
   errorCount: number;
+}
+
+// =============================================================================
+// Prompt Steering Types (Message Queue)
+// =============================================================================
+
+/**
+ * Steer mode determines how messages are handled when the agent is busy:
+ * - "immediate": Send the message to the agent immediately (mid-turn steering)
+ * - "queue": Queue the message to be processed after the current turn completes
+ */
+export type SteerMode = "immediate" | "queue";
+
+/**
+ * A queued message waiting to be sent to the agent
+ */
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  timestamp: string;
+  // Whether this message should be sent immediately when possible
+  priority?: "normal" | "high";
+}
+
+/**
+ * Message queue state for an agent
+ */
+export interface MessageQueueState {
+  // List of queued messages
+  messages: QueuedMessage[];
+  // Current steer mode
+  steerMode: SteerMode;
+  // Whether the agent is currently processing a queued message
+  processingQueue: boolean;
+  // Index of currently selected message in queue (for navigation)
+  selectedIndex: number;
+}
+
+/**
+ * Steering configuration for an agent
+ */
+export interface SteerConfig {
+  // Default steer mode for new messages
+  defaultSteerMode: SteerMode;
+  // Whether to auto-process queue when agent becomes idle
+  autoProcessQueue: boolean;
+  // Maximum number of messages to keep in queue
+  maxQueueSize: number;
 }
 

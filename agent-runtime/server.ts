@@ -9,6 +9,9 @@ import type {
   ToolActivity,
   PendingInputRequest,
   RalphLoopState,
+  QueuedMessage,
+  MessageQueueState,
+  SteerMode,
 } from "./types";
 
 const PORT = 9847;
@@ -259,6 +262,81 @@ async function handleMessage(
       return { type: "ralph_state", state };
     }
 
+    // =========================================================================
+    // Prompt Steering (Message Queue)
+    // =========================================================================
+
+    case "queue_message": {
+      const queuedMsg = agentManager.queueMessage(
+        message.agent_id,
+        message.message,
+        message.priority
+      );
+      if (queuedMsg) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to queue message" };
+    }
+
+    case "send_steer_message": {
+      const success = await agentManager.sendSteerMessage(
+        message.agent_id,
+        message.message
+      );
+      if (success) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to send steer message" };
+    }
+
+    case "clear_queue": {
+      const cleared = agentManager.clearQueue(message.agent_id);
+      if (cleared) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to clear queue" };
+    }
+
+    case "remove_queued_message": {
+      const removed = agentManager.removeQueuedMessage(
+        message.agent_id,
+        message.message_id
+      );
+      if (removed) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to remove queued message" };
+    }
+
+    case "process_queue": {
+      agentManager.processQueue(message.agent_id);
+      return { type: "success" };
+    }
+
+    case "get_queue_state": {
+      const queueState = agentManager.getQueueState(message.agent_id);
+      if (queueState) {
+        return { type: "queue_state", state: queueState };
+      }
+      return { type: "error", message: "Agent not found" };
+    }
+
+    case "set_steer_mode": {
+      const modeSet = agentManager.setSteerMode(message.agent_id, message.mode);
+      if (modeSet) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to set steer mode" };
+    }
+
+    case "interrupt_agent": {
+      const interrupted = agentManager.interruptAgent(message.agent_id);
+      if (interrupted) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "Failed to interrupt agent (agent may not be running)" };
+    }
+
     default:
       return { type: "error", message: "Unknown message type" };
   }
@@ -404,6 +482,67 @@ agentManager.on("ralph:loop_error", (data: { agent_id: string; state: RalphLoopS
     agent_id: data.agent_id,
     state: data.state,
     error: data.error,
+  });
+});
+
+// Prompt Steering (Message Queue) events
+agentManager.on("queue:message_added", (data: { agent_id: string; message: QueuedMessage }) => {
+  broadcastEvent(data.agent_id, {
+    type: "queue_message_added",
+    agent_id: data.agent_id,
+    message: data.message,
+  });
+});
+
+agentManager.on("queue:message_removed", (data: { agent_id: string; message_id: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "queue_message_removed",
+    agent_id: data.agent_id,
+    message_id: data.message_id,
+  });
+});
+
+agentManager.on("queue:cleared", (data: { agent_id: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "queue_cleared",
+    agent_id: data.agent_id,
+  });
+});
+
+agentManager.on("queue:processing_started", (data: { agent_id: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "queue_processing_started",
+    agent_id: data.agent_id,
+  });
+});
+
+agentManager.on("queue:processing_completed", (data: { agent_id: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "queue_processing_completed",
+    agent_id: data.agent_id,
+  });
+});
+
+agentManager.on("steer:mode_changed", (data: { agent_id: string; mode: SteerMode }) => {
+  broadcastEvent(data.agent_id, {
+    type: "steer_mode_changed",
+    agent_id: data.agent_id,
+    mode: data.mode,
+  });
+});
+
+agentManager.on("agent:interrupted", (data: { agent_id: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "agent_interrupted",
+    agent_id: data.agent_id,
+  });
+});
+
+agentManager.on("steer:message_injected", (data: { agent_id: string; message: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "steer_message_injected",
+    agent_id: data.agent_id,
+    message: data.message,
   });
 });
 

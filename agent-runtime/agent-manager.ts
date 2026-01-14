@@ -21,6 +21,9 @@ import type {
   AgentStatus,
   RalphLoopConfig,
   RalphLoopState,
+  SteerMode,
+  QueuedMessage,
+  MessageQueueState,
 } from "./types";
 
 // =============================================================================
@@ -53,6 +56,12 @@ interface RunningAgent {
   ralphConfig?: RalphLoopConfig;
   ralphLoopActive?: boolean;
   ralphCancelled?: boolean;
+
+  // Prompt steering / Message queue
+  messageQueue: QueuedMessage[];
+  steerMode: SteerMode;
+  processingQueue: boolean;
+  interruptRequested: boolean;
 }
 
 // =============================================================================
@@ -154,11 +163,24 @@ export class AgentManager extends EventEmitter {
     // Get initial git info
     agent.git_info = await this.fetchGitInfo(git);
 
+    // Initialize queue state on the agent
+    const initialQueueState: MessageQueueState = {
+      messages: [],
+      steerMode: "immediate",
+      processingQueue: false,
+      selectedIndex: -1,
+    };
+    agent.queue_state = initialQueueState;
+
     const runningAgent: RunningAgent = {
       agent,
       git,
       sessionId,
       mcpServers: new Map(),
+      messageQueue: [],
+      steerMode: "immediate",
+      processingQueue: false,
+      interruptRequested: false,
     };
 
     this.agents.set(id, runningAgent);
@@ -1658,5 +1680,368 @@ ${config.systemPromptAddition || ""}`;
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // ===========================================================================
+  // Prompt Steering / Message Queue
+  // ===========================================================================
+
+  /**
+   * Queue a message to be sent to the agent when it becomes idle
+   */
+  queueMessage(agentId: string, content: string, priority: "normal" | "high" = "normal"): QueuedMessage | null {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return null;
+
+    const { agent } = runningAgent;
+
+    const queuedMessage: QueuedMessage = {
+      id: uuidv4(),
+      content,
+      timestamp: new Date().toISOString(),
+      priority,
+    };
+
+    runningAgent.messageQueue.push(queuedMessage);
+
+    // Update agent's queue state
+    if (agent.queue_state) {
+      agent.queue_state.messages = [...runningAgent.messageQueue];
+    }
+
+    // Emit event
+    this.emit("queue:message_added", {
+      agent_id: agent.id,
+      message: queuedMessage,
+    });
+
+    // Add system message about queued message
+    const systemMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: `[Queue] Message queued: "${content.slice(0, 50)}${content.length > 50 ? '...' : ''}"`,
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(systemMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+    return queuedMessage;
+  }
+
+  /**
+   * Send a steering message to the agent immediately (mid-turn)
+   * This attempts to inject the message into the current conversation
+   */
+  async sendSteerMessage(agentId: string, message: string): Promise<boolean> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    const { agent } = runningAgent;
+
+    // If agent is idle, just send the message normally
+    if (agent.status === "idle") {
+      await this.sendMessage(agentId, message);
+      return true;
+    }
+
+    // If agent is running, we need to handle this specially
+    // For immediate steering, we interrupt and then send
+    if (runningAgent.steerMode === "immediate") {
+      // Add system message about steering
+      const systemMessage: AgentMessage = {
+        id: uuidv4(),
+        message_type: "system",
+        content: `[Steer] Injecting message mid-turn: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`,
+        timestamp: new Date().toISOString(),
+      };
+      agent.messages.push(systemMessage);
+      this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+      // Emit steer message injected event
+      this.emit("steer:message_injected", {
+        agent_id: agent.id,
+        message,
+      });
+
+      // Request interrupt and queue the message with high priority
+      runningAgent.interruptRequested = true;
+
+      // Queue the message with high priority so it's processed first
+      const queuedMsg = this.queueMessage(agentId, message, "high");
+      if (queuedMsg) {
+        // Move high priority messages to the front
+        this.reorderQueueByPriority(runningAgent);
+      }
+
+      return true;
+    } else {
+      // Queue mode - just queue the message
+      return this.queueMessage(agentId, message) !== null;
+    }
+  }
+
+  /**
+   * Reorder queue so high priority messages come first
+   */
+  private reorderQueueByPriority(runningAgent: RunningAgent): void {
+    const highPriority = runningAgent.messageQueue.filter(m => m.priority === "high");
+    const normalPriority = runningAgent.messageQueue.filter(m => m.priority !== "high");
+    runningAgent.messageQueue = [...highPriority, ...normalPriority];
+
+    // Update agent's queue state
+    if (runningAgent.agent.queue_state) {
+      runningAgent.agent.queue_state.messages = [...runningAgent.messageQueue];
+    }
+  }
+
+  /**
+   * Remove a specific message from the queue
+   */
+  removeQueuedMessage(agentId: string, messageId: string): boolean {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    const { agent } = runningAgent;
+    const initialLength = runningAgent.messageQueue.length;
+
+    runningAgent.messageQueue = runningAgent.messageQueue.filter(m => m.id !== messageId);
+
+    if (runningAgent.messageQueue.length < initialLength) {
+      // Update agent's queue state
+      if (agent.queue_state) {
+        agent.queue_state.messages = [...runningAgent.messageQueue];
+      }
+
+      this.emit("queue:message_removed", {
+        agent_id: agent.id,
+        message_id: messageId,
+      });
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Clear all queued messages
+   */
+  clearQueue(agentId: string): boolean {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    const { agent } = runningAgent;
+
+    runningAgent.messageQueue = [];
+
+    // Update agent's queue state
+    if (agent.queue_state) {
+      agent.queue_state.messages = [];
+      agent.queue_state.selectedIndex = -1;
+    }
+
+    this.emit("queue:cleared", { agent_id: agent.id });
+
+    // Add system message
+    const systemMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: "[Queue] All queued messages cleared",
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(systemMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+    return true;
+  }
+
+  /**
+   * Process all queued messages
+   */
+  async processQueue(agentId: string): Promise<void> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return;
+
+    const { agent } = runningAgent;
+
+    // Don't process if already processing or agent is busy
+    if (runningAgent.processingQueue || agent.status === "running") {
+      return;
+    }
+
+    if (runningAgent.messageQueue.length === 0) {
+      return;
+    }
+
+    runningAgent.processingQueue = true;
+    if (agent.queue_state) {
+      agent.queue_state.processingQueue = true;
+    }
+
+    this.emit("queue:processing_started", { agent_id: agent.id });
+
+    // Process messages one by one
+    while (runningAgent.messageQueue.length > 0 && !runningAgent.interruptRequested) {
+      const message = runningAgent.messageQueue.shift();
+      if (!message) break;
+
+      // Update agent's queue state
+      if (agent.queue_state) {
+        agent.queue_state.messages = [...runningAgent.messageQueue];
+      }
+
+      this.emit("queue:message_removed", {
+        agent_id: agent.id,
+        message_id: message.id,
+      });
+
+      // Send the message
+      await this.sendMessage(agentId, message.content);
+
+      // Wait for the agent to finish processing before sending next
+      await this.waitForAgentIdle(runningAgent);
+    }
+
+    runningAgent.processingQueue = false;
+    if (agent.queue_state) {
+      agent.queue_state.processingQueue = false;
+    }
+
+    this.emit("queue:processing_completed", { agent_id: agent.id });
+  }
+
+  /**
+   * Wait for the agent to become idle
+   */
+  private async waitForAgentIdle(runningAgent: RunningAgent): Promise<void> {
+    const maxWaitTime = 300000; // 5 minutes max
+    const checkInterval = 100;
+    let waited = 0;
+
+    while (runningAgent.agent.status === "running" && waited < maxWaitTime) {
+      await this.sleep(checkInterval);
+      waited += checkInterval;
+    }
+  }
+
+  /**
+   * Get the current queue state
+   */
+  getQueueState(agentId: string): MessageQueueState | null {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return null;
+
+    return {
+      messages: [...runningAgent.messageQueue],
+      steerMode: runningAgent.steerMode,
+      processingQueue: runningAgent.processingQueue,
+      selectedIndex: runningAgent.agent.queue_state?.selectedIndex ?? -1,
+    };
+  }
+
+  /**
+   * Set the steering mode for an agent
+   */
+  setSteerMode(agentId: string, mode: SteerMode): boolean {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    const { agent } = runningAgent;
+
+    runningAgent.steerMode = mode;
+
+    if (agent.queue_state) {
+      agent.queue_state.steerMode = mode;
+    }
+
+    this.emit("steer:mode_changed", {
+      agent_id: agent.id,
+      mode,
+    });
+
+    // Add system message
+    const systemMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: `[Steer] Mode changed to: ${mode === "immediate" ? "Send immediately (mid-turn steering)" : "Queue messages"}`,
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(systemMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+    return true;
+  }
+
+  /**
+   * Interrupt the current agent operation
+   */
+  interruptAgent(agentId: string): boolean {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    const { agent, abortController } = runningAgent;
+
+    if (agent.status !== "running") {
+      return false;
+    }
+
+    runningAgent.interruptRequested = true;
+
+    // Abort the current operation if possible
+    if (abortController) {
+      abortController.abort();
+    }
+
+    // Create a new abort controller for future operations
+    runningAgent.abortController = new AbortController();
+
+    this.emit("agent:interrupted", { agent_id: agent.id });
+
+    // Add system message
+    const systemMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: "[Interrupt] Agent operation interrupted",
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(systemMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+    // Reset interrupt flag after a short delay
+    setTimeout(() => {
+      runningAgent.interruptRequested = false;
+    }, 100);
+
+    return true;
+  }
+
+  /**
+   * Handle user input - routes to appropriate method based on agent status and steer mode
+   */
+  async handleUserInput(agentId: string, message: string): Promise<void> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return;
+
+    const { agent } = runningAgent;
+
+    if (agent.status === "idle") {
+      // Agent is idle, send directly
+      await this.sendMessage(agentId, message);
+
+      // After sending, check if there are queued messages to process
+      if (runningAgent.messageQueue.length > 0) {
+        // Wait for agent to finish and then process queue
+        await this.waitForAgentIdle(runningAgent);
+        await this.processQueue(agentId);
+      }
+    } else {
+      // Agent is busy
+      if (runningAgent.steerMode === "immediate") {
+        // Immediate mode - try to steer the agent
+        await this.sendSteerMessage(agentId, message);
+      } else {
+        // Queue mode - add to queue
+        this.queueMessage(agentId, message);
+      }
+    }
   }
 }
