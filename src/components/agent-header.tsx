@@ -1,8 +1,9 @@
 "use client";
 
-import { Bot, Cpu, GitBranch, FileCode, Square } from "lucide-react";
+import { Bot, Cpu, GitBranch, FileCode, Square, ExternalLink } from "lucide-react";
 import { Agent, useAgentStore } from "@/store/agent-store";
 import { cn } from "@/lib/utils";
+import { open as openPath } from "@tauri-apps/plugin-shell";
 
 interface AgentHeaderProps {
   agent: Agent;
@@ -112,8 +113,19 @@ export function AgentHeader({ agent }: AgentHeaderProps) {
         )}
 
         {/* Working Directory */}
-        <div className="flex-1 text-muted-foreground truncate">
-          {agent.working_dir}
+        <div className="flex items-center gap-2 flex-1 text-muted-foreground">
+          <div className="flex-1 truncate">
+            {agent.working_dir}
+          </div>
+          <button
+            onClick={() => {
+              openPath(agent.working_dir);
+            }}
+            className="p-1 hover:bg-accent rounded-sm transition-colors"
+            title="Open in file manager"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </button>
         </div>
       </div>
     </div>

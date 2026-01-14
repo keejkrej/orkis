@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Bot, Cpu, FolderOpen } from "lucide-react";
 import { AgentConfig } from "@/store/agent-store";
 import { cn } from "@/lib/utils";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 interface NewAgentDialogProps {
   open: boolean;
@@ -128,9 +129,19 @@ export function NewAgentDialog({
                 <button
                   type="button"
                   className="px-3 py-2 border rounded-md hover:bg-accent"
-                  onClick={() => {
-                    // In Tauri, we'd use the dialog plugin here
-                    // For now, just a placeholder
+                  onClick={async () => {
+                    try {
+                      const selected = await openDialog({
+                        directory: true,
+                        multiple: false,
+                        title: "Select Working Directory"
+                      });
+                      if (selected && typeof selected === "string") {
+                        setWorkingDir(selected);
+                      }
+                    } catch (error) {
+                      console.error("Failed to open dialog:", error);
+                    }
                   }}
                 >
                   <FolderOpen className="w-4 h-4" />

@@ -26,7 +26,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": ["default"]
     }
   },
   "bundle": {
@@ -42,14 +43,7 @@
   },
   "plugins": {
     "shell": {
-      "all": true,
-      "sidecar": [
-        {
-          "name": "agent-runtime",
-          "command": "node",
-          "args": ["agent-runtime/dist/server.js"]
-        }
-      ]
+      "open": true
     }
   }
 }

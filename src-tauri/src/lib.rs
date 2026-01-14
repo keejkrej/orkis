@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 use tokio::sync::Mutex;
-use tokio_tungstenite::connect_async;
-use futures_util::{SinkExt, StreamExt};
 
 mod agent_bridge;
 

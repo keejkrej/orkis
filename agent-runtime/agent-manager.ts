@@ -239,10 +239,54 @@ export class AgentManager extends EventEmitter {
 
       console.log(result);
 
+      // Parse the result if it's a structured response
+      let content: string;
+      if (typeof result === "string") {
+        content = result;
+      } else if (result && typeof result === "object") {
+        // Handle structured response with items, finalResponse, etc.
+        if (result.items && Array.isArray(result.items)) {
+          // Send each item as a separate message
+          for (const item of result.items) {
+            if (item.type === "reasoning") {
+              const reasoningMessage: AgentMessage = {
+                id: uuidv4(),
+                message_type: "system",
+                content: item.text,
+                timestamp: new Date().toISOString(),
+              };
+              agent.messages.push(reasoningMessage);
+              this.emit("agent:message", {
+                agent_id: agent.id,
+                message: reasoningMessage,
+              });
+            } else if (item.type === "agent_message") {
+              const agentMessage: AgentMessage = {
+                id: uuidv4(),
+                message_type: "assistant",
+                content: item.text,
+                timestamp: new Date().toISOString(),
+              };
+              agent.messages.push(agentMessage);
+              this.emit("agent:message", {
+                agent_id: agent.id,
+                message: agentMessage,
+              });
+            }
+          }
+          // Use finalResponse as the main response if available
+          content = result.finalResponse || JSON.stringify(result);
+        } else {
+          content = JSON.stringify(result);
+        }
+      } else {
+        content = String(result);
+      }
+
       const message: AgentMessage = {
         id: uuidv4(),
         message_type: "assistant",
-        content: typeof result === "string" ? result : JSON.stringify(result),
+        content,
         timestamp: new Date().toISOString(),
       };
       agent.messages.push(message);
