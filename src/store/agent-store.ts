@@ -8,6 +8,23 @@ export interface AgentConfig {
   model?: string;
 }
 
+// Steer mode determines how messages are handled when the agent is busy
+export type SteerMode = "immediate" | "queue";
+
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  timestamp: string;
+  priority?: "normal" | "high";
+}
+
+export interface MessageQueueState {
+  messages: QueuedMessage[];
+  steerMode: SteerMode;
+  processingQueue: boolean;
+  selectedIndex: number;
+}
+
 export interface Agent {
   id: string;
   agent_type: "claude-code" | "codex";
@@ -19,6 +36,7 @@ export interface Agent {
   messages: AgentMessage[];
   git_info?: GitInfo;
   code_changes: CodeChange[];
+  queue_state?: MessageQueueState;
 }
 
 export interface Plan {
@@ -70,6 +88,16 @@ interface AgentState {
   selectAgent: (agentId: string | null) => void;
   sendMessage: (agentId: string, message: string) => Promise<void>;
   refreshAgents: () => Promise<void>;
+
+  // Prompt Steering / Message Queue Actions
+  queueMessage: (agentId: string, message: string, priority?: "normal" | "high") => Promise<void>;
+  sendSteerMessage: (agentId: string, message: string) => Promise<void>;
+  clearQueue: (agentId: string) => Promise<void>;
+  removeQueuedMessage: (agentId: string, messageId: string) => Promise<void>;
+  processQueue: (agentId: string) => Promise<void>;
+  setSteerMode: (agentId: string, mode: SteerMode) => Promise<void>;
+  interruptAgent: (agentId: string) => Promise<void>;
+  handleUserInput: (agentId: string, message: string) => Promise<void>;
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -194,6 +222,90 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       ws.send(JSON.stringify({ type: "list_agents" }));
     });
   },
+
+  // ===========================================================================
+  // Prompt Steering / Message Queue Actions
+  // ===========================================================================
+
+  queueMessage: async (agentId: string, message: string, priority: "normal" | "high" = "normal"): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(
+      JSON.stringify({ type: "queue_message", agent_id: agentId, message, priority })
+    );
+  },
+
+  sendSteerMessage: async (agentId: string, message: string): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(
+      JSON.stringify({ type: "send_steer_message", agent_id: agentId, message })
+    );
+  },
+
+  clearQueue: async (agentId: string): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(JSON.stringify({ type: "clear_queue", agent_id: agentId }));
+  },
+
+  removeQueuedMessage: async (agentId: string, messageId: string): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(
+      JSON.stringify({ type: "remove_queued_message", agent_id: agentId, message_id: messageId })
+    );
+  },
+
+  processQueue: async (agentId: string): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(JSON.stringify({ type: "process_queue", agent_id: agentId }));
+  },
+
+  setSteerMode: async (agentId: string, mode: SteerMode): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(JSON.stringify({ type: "set_steer_mode", agent_id: agentId, mode }));
+  },
+
+  interruptAgent: async (agentId: string): Promise<void> => {
+    const { ws } = get();
+    if (!ws) throw new Error("Not connected");
+
+    ws.send(JSON.stringify({ type: "interrupt_agent", agent_id: agentId }));
+  },
+
+  handleUserInput: async (agentId: string, message: string): Promise<void> => {
+    const { ws, agents } = get();
+    if (!ws) throw new Error("Not connected");
+
+    const agent = agents.find((a) => a.id === agentId);
+    if (!agent) throw new Error("Agent not found");
+
+    // Get the steer mode from the agent's queue state
+    const steerMode = agent.queue_state?.steerMode ?? "immediate";
+
+    if (agent.status === "idle") {
+      // Agent is idle, send directly
+      ws.send(JSON.stringify({ type: "send_message", agent_id: agentId, message }));
+    } else {
+      // Agent is busy
+      if (steerMode === "immediate") {
+        // Immediate mode - try to steer the agent
+        ws.send(JSON.stringify({ type: "send_steer_message", agent_id: agentId, message }));
+      } else {
+        // Queue mode - add to queue
+        ws.send(JSON.stringify({ type: "queue_message", agent_id: agentId, message }));
+      }
+    }
+  },
 }));
 
 // Handle incoming events
@@ -261,6 +373,127 @@ function handleEvent(
         agents: state.agents.map((a) =>
           a.id === agent_id
             ? { ...a, code_changes: [...a.code_changes, change] }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    // Prompt Steering / Message Queue Events
+    case "queue_message_added": {
+      const { agent_id, message } = data as {
+        agent_id: string;
+        message: QueuedMessage;
+      };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  messages: [...(a.queue_state?.messages || []), message],
+                },
+              }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    case "queue_message_removed": {
+      const { agent_id, message_id } = data as {
+        agent_id: string;
+        message_id: string;
+      };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  messages: (a.queue_state?.messages || []).filter(
+                    (m) => m.id !== message_id
+                  ),
+                },
+              }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    case "queue_cleared": {
+      const { agent_id } = data as { agent_id: string };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  messages: [],
+                  selectedIndex: -1,
+                },
+              }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    case "queue_processing_started": {
+      const { agent_id } = data as { agent_id: string };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  processingQueue: true,
+                },
+              }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    case "queue_processing_completed": {
+      const { agent_id } = data as { agent_id: string };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  processingQueue: false,
+                },
+              }
+            : a,
+        ),
+      }));
+      break;
+    }
+
+    case "steer_mode_changed": {
+      const { agent_id, mode } = data as {
+        agent_id: string;
+        mode: SteerMode;
+      };
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.id === agent_id
+            ? {
+                ...a,
+                queue_state: {
+                  ...a.queue_state!,
+                  steerMode: mode,
+                },
+              }
             : a,
         ),
       }));
