@@ -1,14 +1,14 @@
-'use client'
+"use client";
 
-import { useState } from 'react'
-import { Bot, Cpu, FolderOpen } from 'lucide-react'
-import { AgentConfig } from '@/store/agent-store'
-import { cn } from '@/lib/utils'
+import { useState } from "react";
+import { Bot, Cpu, FolderOpen } from "lucide-react";
+import { AgentConfig } from "@/store/agent-store";
+import { cn } from "@/lib/utils";
 
 interface NewAgentDialogProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onCreate: (config: AgentConfig) => Promise<void>
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCreate: (config: AgentConfig) => Promise<void>;
 }
 
 export function NewAgentDialog({
@@ -16,36 +16,36 @@ export function NewAgentDialog({
   onOpenChange,
   onCreate,
 }: NewAgentDialogProps) {
-  const [agentType, setAgentType] = useState<'claude-code' | 'codex'>(
-    'claude-code'
-  )
-  const [name, setName] = useState('')
-  const [workingDir, setWorkingDir] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [agentType, setAgentType] = useState<"claude-code" | "codex">(
+    "claude-code",
+  );
+  const [name, setName] = useState("");
+  const [workingDir, setWorkingDir] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!name.trim() || !workingDir.trim()) return
+    e.preventDefault();
+    if (!name.trim() || !workingDir.trim()) return;
 
-    setLoading(true)
+    setLoading(true);
     try {
       await onCreate({
         agent_type: agentType,
         name: name.trim(),
         working_dir: workingDir.trim(),
         prompt: prompt.trim() || undefined,
-      })
+      });
       // Reset form
-      setName('')
-      setWorkingDir('')
-      setPrompt('')
+      setName("");
+      setWorkingDir("");
+      setPrompt("");
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
-  if (!open) return null
+  if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -67,12 +67,12 @@ export function NewAgentDialog({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => setAgentType('claude-code')}
+                  onClick={() => setAgentType("claude-code")}
                   className={cn(
-                    'flex items-center gap-2 p-3 rounded-md border transition-colors',
-                    agentType === 'claude-code'
-                      ? 'border-claude bg-claude/10 text-claude'
-                      : 'border-border hover:border-claude/50'
+                    "flex items-center gap-2 p-3 rounded-md border transition-colors",
+                    agentType === "claude-code"
+                      ? "border-claude bg-claude/10 text-claude"
+                      : "border-border hover:border-claude/50",
                   )}
                 >
                   <Bot className="w-5 h-5" />
@@ -80,12 +80,12 @@ export function NewAgentDialog({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAgentType('codex')}
+                  onClick={() => setAgentType("codex")}
                   className={cn(
-                    'flex items-center gap-2 p-3 rounded-md border transition-colors',
-                    agentType === 'codex'
-                      ? 'border-codex bg-codex/10 text-codex'
-                      : 'border-border hover:border-codex/50'
+                    "flex items-center gap-2 p-3 rounded-md border transition-colors",
+                    agentType === "codex"
+                      ? "border-codex bg-codex/10 text-codex"
+                      : "border-border hover:border-codex/50",
                   )}
                 >
                   <Cpu className="w-5 h-5" />
@@ -167,12 +167,12 @@ export function NewAgentDialog({
                 disabled={loading || !name.trim() || !workingDir.trim()}
                 className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {loading ? 'Creating...' : 'Create Agent'}
+                {loading ? "Creating..." : "Create Agent"}
               </button>
             </div>
           </form>
         </div>
       </div>
     </div>
-  )
+  );
 }

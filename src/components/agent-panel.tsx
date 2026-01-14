@@ -1,12 +1,12 @@
-'use client'
+"use client";
 
-import { useAgentStore } from '@/store/agent-store'
-import { AgentHeader } from './agent-header'
-import { AgentTabs } from './agent-tabs'
+import { useAgentStore } from "@/store/agent-store";
+import { AgentHeader } from "./agent-header";
+import { AgentTabs } from "./agent-tabs";
 
 export function AgentPanel() {
-  const { agents, selectedAgentId } = useAgentStore()
-  const selectedAgent = agents.find((a) => a.id === selectedAgentId)
+  const { agents, selectedAgentId } = useAgentStore();
+  const selectedAgent = agents.find((a) => a.id === selectedAgentId);
 
   if (!selectedAgent) {
     return (
@@ -18,7 +18,7 @@ export function AgentPanel() {
           </p>
         </div>
       </div>
-    )
+    );
   }
 
   return (
@@ -26,5 +26,5 @@ export function AgentPanel() {
       <AgentHeader agent={selectedAgent} />
       <AgentTabs agent={selectedAgent} />
     </div>
-  )
+  );
 }

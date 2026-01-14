@@ -1,28 +1,35 @@
-'use client'
+"use client";
 
-import { Wrench, FileEdit, Terminal, Search, Globe, Activity } from 'lucide-react'
-import { Agent, AgentMessage } from '@/store/agent-store'
-import { cn } from '@/lib/utils'
+import {
+  Wrench,
+  FileEdit,
+  Terminal,
+  Search,
+  Globe,
+  Activity,
+} from "lucide-react";
+import { Agent, AgentMessage } from "@/store/agent-store";
+import { cn } from "@/lib/utils";
 
 interface ActivityTabProps {
-  agent: Agent
+  agent: Agent;
 }
 
 // Map tool names to icons and colors
 const toolConfig: Record<string, { icon: typeof Wrench; color: string }> = {
-  Edit: { icon: FileEdit, color: 'text-blue-500' },
-  Write: { icon: FileEdit, color: 'text-green-500' },
-  Read: { icon: FileEdit, color: 'text-gray-500' },
-  Bash: { icon: Terminal, color: 'text-yellow-500' },
-  Grep: { icon: Search, color: 'text-purple-500' },
-  Glob: { icon: Search, color: 'text-purple-400' },
-  WebFetch: { icon: Globe, color: 'text-cyan-500' },
-  WebSearch: { icon: Globe, color: 'text-cyan-400' },
-}
+  Edit: { icon: FileEdit, color: "text-blue-500" },
+  Write: { icon: FileEdit, color: "text-green-500" },
+  Read: { icon: FileEdit, color: "text-gray-500" },
+  Bash: { icon: Terminal, color: "text-yellow-500" },
+  Grep: { icon: Search, color: "text-purple-500" },
+  Glob: { icon: Search, color: "text-purple-400" },
+  WebFetch: { icon: Globe, color: "text-cyan-500" },
+  WebSearch: { icon: Globe, color: "text-cyan-400" },
+};
 
 export function ActivityTab({ agent }: ActivityTabProps) {
   // Filter only tool messages
-  const toolMessages = agent.messages.filter((m) => m.message_type === 'tool')
+  const toolMessages = agent.messages.filter((m) => m.message_type === "tool");
 
   if (toolMessages.length === 0) {
     return (
@@ -35,11 +42,11 @@ export function ActivityTab({ agent }: ActivityTabProps) {
           </p>
         </div>
       </div>
-    )
+    );
   }
 
   // Group activities by time (rough buckets)
-  const groupedActivities = groupByTime(toolMessages)
+  const groupedActivities = groupByTime(toolMessages);
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -56,27 +63,35 @@ export function ActivityTab({ agent }: ActivityTabProps) {
         </div>
       ))}
     </div>
-  )
+  );
 }
 
 function ActivityItem({ message }: { message: AgentMessage }) {
   const config = message.tool_name
-    ? toolConfig[message.tool_name] || { icon: Wrench, color: 'text-muted-foreground' }
-    : { icon: Wrench, color: 'text-muted-foreground' }
+    ? toolConfig[message.tool_name] || {
+        icon: Wrench,
+        color: "text-muted-foreground",
+      }
+    : { icon: Wrench, color: "text-muted-foreground" };
 
-  const Icon = config.icon
+  const Icon = config.icon;
 
   // Parse tool input for display
-  const inputSummary = getInputSummary(message.tool_name || '', message.tool_input)
+  const inputSummary = getInputSummary(
+    message.tool_name || "",
+    message.tool_input,
+  );
 
   return (
     <div className="flex items-start gap-3 p-3 border rounded-lg hover:bg-accent/30 transition-colors">
-      <div className={cn('p-2 rounded-md bg-muted', config.color)}>
+      <div className={cn("p-2 rounded-md bg-muted", config.color)}>
         <Icon className="w-4 h-4" />
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
-          <span className="font-medium">{message.tool_name || 'Unknown Tool'}</span>
+          <span className="font-medium">
+            {message.tool_name || "Unknown Tool"}
+          </span>
           <span className="text-xs text-muted-foreground">
             {new Date(message.timestamp).toLocaleTimeString()}
           </span>
@@ -88,67 +103,67 @@ function ActivityItem({ message }: { message: AgentMessage }) {
         )}
       </div>
     </div>
-  )
+  );
 }
 
 function getInputSummary(toolName: string, input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null
+  if (!input || typeof input !== "object") return null;
 
-  const obj = input as Record<string, unknown>
+  const obj = input as Record<string, unknown>;
 
   switch (toolName) {
-    case 'Edit':
-    case 'Write':
-    case 'Read':
-      return obj.file_path as string || null
-    case 'Bash':
-      return obj.command as string || null
-    case 'Grep':
-    case 'Glob':
-      return obj.pattern as string || null
-    case 'WebFetch':
-    case 'WebSearch':
-      return (obj.url || obj.query) as string || null
+    case "Edit":
+    case "Write":
+    case "Read":
+      return (obj.file_path as string) || null;
+    case "Bash":
+      return (obj.command as string) || null;
+    case "Grep":
+    case "Glob":
+      return (obj.pattern as string) || null;
+    case "WebFetch":
+    case "WebSearch":
+      return ((obj.url || obj.query) as string) || null;
     default:
-      return null
+      return null;
   }
 }
 
 interface TimeGroup {
-  label: string
-  messages: AgentMessage[]
+  label: string;
+  messages: AgentMessage[];
 }
 
 function groupByTime(messages: AgentMessage[]): TimeGroup[] {
-  const now = new Date()
-  const groups: TimeGroup[] = []
+  const now = new Date();
+  const groups: TimeGroup[] = [];
 
-  const sortedMessages = [...messages].reverse() // Most recent first
+  const sortedMessages = [...messages].reverse(); // Most recent first
 
-  let currentGroup: TimeGroup | null = null
+  let currentGroup: TimeGroup | null = null;
 
   for (const message of sortedMessages) {
-    const msgDate = new Date(message.timestamp)
-    const diffMinutes = (now.getTime() - msgDate.getTime()) / (1000 * 60)
+    const msgDate = new Date(message.timestamp);
+    const diffMinutes = (now.getTime() - msgDate.getTime()) / (1000 * 60);
 
-    let label: string
+    let label: string;
     if (diffMinutes < 1) {
-      label = 'Just now'
+      label = "Just now";
     } else if (diffMinutes < 5) {
-      label = 'A few minutes ago'
+      label = "A few minutes ago";
     } else if (diffMinutes < 60) {
-      label = `${Math.floor(diffMinutes)} minutes ago`
+      label = `${Math.floor(diffMinutes)} minutes ago`;
     } else {
-      label = msgDate.toLocaleTimeString()
+      label = msgDate.toLocaleTimeString();
     }
 
     if (!currentGroup || currentGroup.label !== label) {
-      currentGroup = { label, messages: [] }
-      groups.push(currentGroup)
+      currentGroup = { label, messages: [] };
+      groups.push(currentGroup);
     }
 
-    currentGroup.messages.push(message)
+    currentGroup.messages.push(message);
   }
 
-  return groups
+  return groups;
 }

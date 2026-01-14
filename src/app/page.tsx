@@ -1,18 +1,18 @@
-'use client'
+"use client";
 
-import { useEffect } from 'react'
-import { Sidebar } from '@/components/sidebar'
-import { AgentPanel } from '@/components/agent-panel'
-import { Titlebar } from '@/components/titlebar'
-import { useAgentStore } from '@/store/agent-store'
+import { useEffect } from "react";
+import { Sidebar } from "@/components/sidebar";
+import { AgentPanel } from "@/components/agent-panel";
+import { Titlebar } from "@/components/titlebar";
+import { useAgentStore } from "@/store/agent-store";
 
 export default function Home() {
-  const { connect, connected } = useAgentStore()
+  const { connect, connected } = useAgentStore();
 
   useEffect(() => {
     // Connect to the agent runtime on mount
-    connect()
-  }, [connect])
+    connect();
+  }, [connect]);
 
   return (
     <div className="flex flex-col h-screen">
@@ -35,5 +35,5 @@ export default function Home() {
         </main>
       </div>
     </div>
-  )
+  );
 }

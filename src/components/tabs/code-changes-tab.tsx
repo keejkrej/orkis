@@ -1,11 +1,11 @@
-'use client'
+"use client";
 
-import { FileCode, Plus, Minus, Clock } from 'lucide-react'
-import { Agent } from '@/store/agent-store'
-import { cn } from '@/lib/utils'
+import { FileCode, Plus, Minus, Clock } from "lucide-react";
+import { Agent } from "@/store/agent-store";
+import { cn } from "@/lib/utils";
 
 interface CodeChangesTabProps {
-  agent: Agent
+  agent: Agent;
 }
 
 export function CodeChangesTab({ agent }: CodeChangesTabProps) {
@@ -20,34 +20,37 @@ export function CodeChangesTab({ agent }: CodeChangesTabProps) {
           </p>
         </div>
       </div>
-    )
+    );
   }
 
   // Group changes by file
   const changesByFile = agent.code_changes.reduce(
     (acc, change) => {
       if (!acc[change.file_path]) {
-        acc[change.file_path] = []
+        acc[change.file_path] = [];
       }
-      acc[change.file_path].push(change)
-      return acc
+      acc[change.file_path].push(change);
+      return acc;
     },
-    {} as Record<string, typeof agent.code_changes>
-  )
+    {} as Record<string, typeof agent.code_changes>,
+  );
 
   // Calculate totals per file
-  const fileSummaries = Object.entries(changesByFile).map(([path, changes]) => ({
-    path,
-    totalAdded: changes.reduce((sum, c) => sum + c.lines_added, 0),
-    totalRemoved: changes.reduce((sum, c) => sum + c.lines_removed, 0),
-    changeCount: changes.length,
-    lastChange: changes[changes.length - 1].timestamp,
-  }))
+  const fileSummaries = Object.entries(changesByFile).map(
+    ([path, changes]) => ({
+      path,
+      totalAdded: changes.reduce((sum, c) => sum + c.lines_added, 0),
+      totalRemoved: changes.reduce((sum, c) => sum + c.lines_removed, 0),
+      changeCount: changes.length,
+      lastChange: changes[changes.length - 1].timestamp,
+    }),
+  );
 
   // Sort by most recent
   fileSummaries.sort(
-    (a, b) => new Date(b.lastChange).getTime() - new Date(a.lastChange).getTime()
-  )
+    (a, b) =>
+      new Date(b.lastChange).getTime() - new Date(a.lastChange).getTime(),
+  );
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -83,7 +86,7 @@ export function CodeChangesTab({ agent }: CodeChangesTabProps) {
             <div className="flex-1 min-w-0">
               <div className="font-mono text-sm truncate">{summary.path}</div>
               <div className="text-xs text-muted-foreground">
-                {summary.changeCount} change{summary.changeCount > 1 ? 's' : ''}
+                {summary.changeCount} change{summary.changeCount > 1 ? "s" : ""}
               </div>
             </div>
             <div className="flex items-center gap-3 text-sm">
@@ -104,5 +107,5 @@ export function CodeChangesTab({ agent }: CodeChangesTabProps) {
         ))}
       </div>
     </div>
-  )
+  );
 }

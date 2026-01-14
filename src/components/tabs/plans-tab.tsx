@@ -1,18 +1,18 @@
-'use client'
+"use client";
 
-import { useState } from 'react'
-import { FileText, ChevronRight, ChevronDown, Clock } from 'lucide-react'
-import { Agent, Plan } from '@/store/agent-store'
-import { cn } from '@/lib/utils'
+import { useState } from "react";
+import { FileText, ChevronRight, ChevronDown, Clock } from "lucide-react";
+import { Agent, Plan } from "@/store/agent-store";
+import { cn } from "@/lib/utils";
 
 interface PlansTabProps {
-  agent: Agent
+  agent: Agent;
 }
 
 export function PlansTab({ agent }: PlansTabProps) {
   const [expandedPlanId, setExpandedPlanId] = useState<string | null>(
-    agent.plans[0]?.id || null
-  )
+    agent.plans[0]?.id || null,
+  );
 
   if (agent.plans.length === 0) {
     return (
@@ -25,7 +25,7 @@ export function PlansTab({ agent }: PlansTabProps) {
           </p>
         </div>
       </div>
-    )
+    );
   }
 
   return (
@@ -41,18 +41,18 @@ export function PlansTab({ agent }: PlansTabProps) {
         />
       ))}
     </div>
-  )
+  );
 }
 
 interface PlanCardProps {
-  plan: Plan
-  isExpanded: boolean
-  onToggle: () => void
+  plan: Plan;
+  isExpanded: boolean;
+  onToggle: () => void;
 }
 
 function PlanCard({ plan, isExpanded, onToggle }: PlanCardProps) {
   // Extract title from plan content (first heading or first line)
-  const title = extractTitle(plan.content)
+  const title = extractTitle(plan.content);
 
   return (
     <div className="border rounded-lg overflow-hidden">
@@ -90,21 +90,21 @@ function PlanCard({ plan, isExpanded, onToggle }: PlanCardProps) {
         </div>
       )}
     </div>
-  )
+  );
 }
 
 function extractTitle(content: string): string {
   // Try to find a markdown heading
-  const headingMatch = content.match(/^#\s+(.+)$/m)
+  const headingMatch = content.match(/^#\s+(.+)$/m);
   if (headingMatch) {
-    return headingMatch[1]
+    return headingMatch[1];
   }
 
   // Fall back to first non-empty line
-  const firstLine = content.split('\n').find((line) => line.trim())
+  const firstLine = content.split("\n").find((line) => line.trim());
   if (firstLine) {
-    return firstLine.slice(0, 50) + (firstLine.length > 50 ? '...' : '')
+    return firstLine.slice(0, 50) + (firstLine.length > 50 ? "..." : "");
   }
 
-  return 'Untitled Plan'
+  return "Untitled Plan";
 }

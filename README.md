@@ -53,16 +53,19 @@ A local GUI application for managing Claude Code and OpenAI Codex coding agents.
 ## Setup
 
 1. Install dependencies:
+
 ```bash
 npm install
 ```
 
 2. Start the agent runtime server:
+
 ```bash
 npm run agent:start
 ```
 
 3. In a separate terminal, start the Tauri development server:
+
 ```bash
 npm run tauri:dev
 ```
@@ -70,16 +73,19 @@ npm run tauri:dev
 ## Development
 
 ### Frontend Only (Next.js)
+
 ```bash
 npm run dev
 ```
 
 ### Full App (Tauri + Next.js)
+
 ```bash
 npm run tauri:dev
 ```
 
 ### Build for Production
+
 ```bash
 npm run tauri:build
 ```
@@ -105,6 +111,7 @@ orkis/
 ## Similar Projects
 
 This project draws inspiration from:
+
 - [CCManager](https://github.com/kbwo/ccmanager) - CLI-based session manager
 - [Opcode](https://github.com/winfunc/opcode) - Tauri-based Claude Code GUI
 

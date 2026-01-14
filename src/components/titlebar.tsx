@@ -1,9 +1,9 @@
-'use client'
+"use client";
 
-import { useAgentStore } from '@/store/agent-store'
+import { useAgentStore } from "@/store/agent-store";
 
 export function Titlebar() {
-  const { connected } = useAgentStore()
+  const { connected } = useAgentStore();
 
   return (
     <div className="titlebar h-12 bg-background border-b flex items-center justify-between px-4 pl-20">
@@ -16,13 +16,13 @@ export function Titlebar() {
       <div className="flex items-center gap-2">
         <div
           className={`w-2 h-2 rounded-full ${
-            connected ? 'bg-green-500' : 'bg-red-500'
+            connected ? "bg-green-500" : "bg-red-500"
           }`}
         />
         <span className="text-xs text-muted-foreground">
-          {connected ? 'Connected' : 'Disconnected'}
+          {connected ? "Connected" : "Disconnected"}
         </span>
       </div>
     </div>
-  )
+  );
 }
