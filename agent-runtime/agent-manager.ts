@@ -105,15 +105,20 @@ export class AgentManager extends EventEmitter {
             PostToolUse: [
               {
                 hooks: [
-                  async (input) => {
+                  async (input: any) => {
                     // Track tool usage
+                    // The SDK provides tool_name and tool_input in the hook input
+                    const toolInput = input as {
+                      tool_name: string;
+                      tool_input: unknown;
+                    };
                     const message: AgentMessage = {
                       id: uuidv4(),
                       message_type: "tool",
                       content: JSON.stringify(input, null, 2),
                       timestamp: new Date().toISOString(),
-                      tool_name: input.tool_name,
-                      tool_input: input.tool_input,
+                      tool_name: toolInput.tool_name,
+                      tool_input: toolInput.tool_input,
                     };
                     agent.messages.push(message);
                     this.emit("agent:message", {
@@ -122,9 +127,9 @@ export class AgentManager extends EventEmitter {
                     });
 
                     // Check for code changes on Edit/Write tools
-                    if (["Edit", "Write"].includes(input.tool_name)) {
+                    if (["Edit", "Write"].includes(toolInput.tool_name)) {
                       const filePath = (
-                        input.tool_input as { file_path?: string }
+                        toolInput.tool_input as { file_path?: string }
                       ).file_path;
                       if (filePath) {
                         await this.trackCodeChange(runningAgent, filePath);
