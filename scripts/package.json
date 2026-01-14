@@ -1,18 +1,22 @@
 {
   "name": "orkis-scripts",
   "version": "1.0.0",
-  "description": "Demo and test scripts for Orkis agent runtime",
+  "description": "Demo and test scripts for Orkis agent runtime - comprehensive SDK coverage",
   "private": true,
   "scripts": {
     "demo:claude": "npx ts-node demo-claude-code.ts",
+    "demo:claude:all": "npx ts-node demo-claude-code.ts all",
     "demo:codex": "npx ts-node demo-codex.ts",
+    "demo:codex:all": "npx ts-node demo-codex.ts all",
     "demo:steering": "npx ts-node demo-steering.ts",
     "test:client": "npx ts-node test-runtime-client.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^1.0.0",
     "@openai/codex-sdk": "^1.0.0",
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "zod": "^3.22.0",
+    "zod-to-json-schema": "^3.22.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
