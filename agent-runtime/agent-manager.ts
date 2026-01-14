@@ -95,8 +95,7 @@ export class AgentManager extends EventEmitter {
 
       // Run the agent query
       const result = query({
-        prompt:
-          config.prompt || "Hello, I am ready to help with your coding tasks.",
+        prompt: config.prompt || "Hello",
         options: {
           cwd: config.working_dir,
           abortController,
@@ -235,8 +234,7 @@ export class AgentManager extends EventEmitter {
       const codex = new Codex();
       const thread = codex.startThread();
 
-      const prompt =
-        config.prompt || "Make a plan to diagnose and fix the CI failures";
+      const prompt = config.prompt || "Hello";
       const result = await thread.run(prompt);
 
       console.log(result);
