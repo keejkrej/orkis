@@ -220,6 +220,9 @@ export interface Agent {
 
   // Pending input request
   pending_input?: PendingInputRequest;
+
+  // Ralph Wiggum mode state
+  ralph_state?: RalphLoopState;
 }
 
 // =============================================================================
@@ -365,7 +368,12 @@ export type RuntimeMessage =
   // MCP
   | { type: "list_mcp_tools"; agent_id: string }
   | { type: "add_mcp_server"; agent_id: string; name: string; config: MCPServerConfig }
-  | { type: "remove_mcp_server"; agent_id: string; name: string };
+  | { type: "remove_mcp_server"; agent_id: string; name: string }
+
+  // Ralph Wiggum Mode (Autonomous Loop)
+  | { type: "start_ralph_loop"; agent_id: string; config: RalphLoopConfig }
+  | { type: "cancel_ralph_loop"; agent_id: string }
+  | { type: "get_ralph_state"; agent_id: string };
 
 export type RuntimeResponse =
   | { type: "agent"; agent: Agent }
@@ -379,6 +387,7 @@ export type RuntimeResponse =
   | { type: "git_info"; git_info: GitInfo }
   | { type: "git_diff"; diff: string }
   | { type: "validation"; valid: boolean; errors?: string[] }
+  | { type: "ralph_state"; state: RalphLoopState | null }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -408,7 +417,13 @@ export type RuntimeEvent =
 
   // Session events
   | { type: "agent_session_created"; agent_id: string; session: Session }
-  | { type: "agent_session_resumed"; agent_id: string; session: Session };
+  | { type: "agent_session_resumed"; agent_id: string; session: Session }
+
+  // Ralph Wiggum Mode events
+  | { type: "ralph_loop_started"; agent_id: string; state: RalphLoopState }
+  | { type: "ralph_loop_iteration"; agent_id: string; state: RalphLoopState }
+  | { type: "ralph_loop_completed"; agent_id: string; state: RalphLoopState; reason: "completion_detected" | "max_iterations" | "cancelled" | "error" }
+  | { type: "ralph_loop_error"; agent_id: string; state: RalphLoopState; error: string };
 
 // =============================================================================
 // Model Info
@@ -451,5 +466,58 @@ export interface Plugin {
   commands?: SlashCommand[];
   agents?: SubagentsConfig;
   mcpServers?: Record<string, MCPServerConfig>;
+}
+
+// =============================================================================
+// Ralph Wiggum Mode Types (Autonomous Loop)
+// =============================================================================
+
+export interface RalphLoopConfig {
+  // The task prompt to repeatedly execute
+  prompt: string;
+
+  // Text that signals task completion (e.g., "COMPLETE", "DONE")
+  completionPromise: string;
+
+  // Maximum number of iterations (0 = unlimited, default: 50)
+  maxIterations?: number;
+
+  // Delay between iterations in milliseconds (default: 1000)
+  iterationDelay?: number;
+
+  // Whether to continue on errors (default: true)
+  continueOnError?: boolean;
+
+  // Custom system prompt addition for ralph mode
+  systemPromptAddition?: string;
+}
+
+export interface RalphLoopState {
+  // Whether ralph mode is active
+  active: boolean;
+
+  // Current iteration number
+  currentIteration: number;
+
+  // Maximum iterations allowed
+  maxIterations: number;
+
+  // The completion promise to look for
+  completionPromise: string;
+
+  // The original prompt being looped
+  originalPrompt: string;
+
+  // Timestamp when the loop started
+  startedAt: string;
+
+  // Whether completion was detected
+  completionDetected: boolean;
+
+  // Last iteration result summary
+  lastIterationSummary?: string;
+
+  // Error count during the loop
+  errorCount: number;
 }
 

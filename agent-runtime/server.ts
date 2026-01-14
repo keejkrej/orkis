@@ -8,6 +8,7 @@ import type {
   Session,
   ToolActivity,
   PendingInputRequest,
+  RalphLoopState,
 } from "./types";
 
 const PORT = 9847;
@@ -22,6 +23,7 @@ console.log(`Agent runtime server listening on ws://127.0.0.1:${PORT}`);
 console.log("Supported features:");
 console.log("  - Claude Code: hooks, subagents, MCP, permissions, sessions");
 console.log("  - Codex: threads, approval modes, resume, web search");
+console.log("  - Ralph Wiggum Mode: autonomous iteration loops for both SDKs");
 
 wss.on("connection", (ws: WebSocket) => {
   console.log("Client connected");
@@ -229,6 +231,34 @@ async function handleMessage(
       return { type: "error", message: "Failed to remove MCP server" };
     }
 
+    // =========================================================================
+    // Ralph Wiggum Mode (Autonomous Loop)
+    // =========================================================================
+
+    case "start_ralph_loop": {
+      const state = await agentManager.startRalphLoop(
+        message.agent_id,
+        message.config
+      );
+      if (state) {
+        return { type: "ralph_state", state };
+      }
+      return { type: "error", message: "Failed to start Ralph loop" };
+    }
+
+    case "cancel_ralph_loop": {
+      const cancelled = agentManager.cancelRalphLoop(message.agent_id);
+      if (cancelled) {
+        return { type: "success" };
+      }
+      return { type: "error", message: "No active Ralph loop to cancel" };
+    }
+
+    case "get_ralph_state": {
+      const state = agentManager.getRalphState(message.agent_id);
+      return { type: "ralph_state", state };
+    }
+
     default:
       return { type: "error", message: "Unknown message type" };
   }
@@ -339,6 +369,41 @@ agentManager.on("agent:session_resumed", (data: { agent_id: string; session: Ses
     type: "agent_session_resumed",
     agent_id: data.agent_id,
     session: data.session,
+  });
+});
+
+// Ralph Wiggum Mode events
+agentManager.on("ralph:loop_started", (data: { agent_id: string; state: RalphLoopState }) => {
+  broadcastEvent(data.agent_id, {
+    type: "ralph_loop_started",
+    agent_id: data.agent_id,
+    state: data.state,
+  });
+});
+
+agentManager.on("ralph:loop_iteration", (data: { agent_id: string; state: RalphLoopState }) => {
+  broadcastEvent(data.agent_id, {
+    type: "ralph_loop_iteration",
+    agent_id: data.agent_id,
+    state: data.state,
+  });
+});
+
+agentManager.on("ralph:loop_completed", (data: { agent_id: string; state: RalphLoopState; reason: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "ralph_loop_completed",
+    agent_id: data.agent_id,
+    state: data.state,
+    reason: data.reason as "completion_detected" | "max_iterations" | "cancelled" | "error",
+  });
+});
+
+agentManager.on("ralph:loop_error", (data: { agent_id: string; state: RalphLoopState; error: string }) => {
+  broadcastEvent(data.agent_id, {
+    type: "ralph_loop_error",
+    agent_id: data.agent_id,
+    state: data.state,
+    error: data.error,
   });
 });
 

@@ -19,6 +19,8 @@ import type {
   MCPTool,
   ModelInfo,
   AgentStatus,
+  RalphLoopConfig,
+  RalphLoopState,
 } from "./types";
 
 // =============================================================================
@@ -46,6 +48,11 @@ interface RunningAgent {
 
   // Active MCP servers
   mcpServers?: Map<string, MCPServerConfig>;
+
+  // Ralph Wiggum mode
+  ralphConfig?: RalphLoopConfig;
+  ralphLoopActive?: boolean;
+  ralphCancelled?: boolean;
 }
 
 // =============================================================================
@@ -1311,5 +1318,345 @@ export class AgentManager extends EventEmitter {
       valid: errors.length === 0,
       errors,
     };
+  }
+
+  // ===========================================================================
+  // Ralph Wiggum Mode (Autonomous Loop)
+  // ===========================================================================
+
+  async startRalphLoop(agentId: string, config: RalphLoopConfig): Promise<RalphLoopState | null> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return null;
+
+    const { agent } = runningAgent;
+
+    // Don't start if already in ralph mode
+    if (runningAgent.ralphLoopActive) {
+      return agent.ralph_state || null;
+    }
+
+    // Initialize ralph state
+    const ralphState: RalphLoopState = {
+      active: true,
+      currentIteration: 0,
+      maxIterations: config.maxIterations || 50,
+      completionPromise: config.completionPromise,
+      originalPrompt: config.prompt,
+      startedAt: new Date().toISOString(),
+      completionDetected: false,
+      errorCount: 0,
+    };
+
+    agent.ralph_state = ralphState;
+    runningAgent.ralphConfig = config;
+    runningAgent.ralphLoopActive = true;
+    runningAgent.ralphCancelled = false;
+
+    // Emit ralph loop started event
+    this.emit("ralph:loop_started", {
+      agent_id: agent.id,
+      state: ralphState,
+    });
+
+    // Add system message about ralph mode
+    const systemMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: `Ralph Wiggum mode activated. Task: "${config.prompt}". Looking for completion signal: "<promise>${config.completionPromise}</promise>". Max iterations: ${ralphState.maxIterations}`,
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(systemMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: systemMessage });
+
+    // Build the ralph prompt with completion instructions
+    const ralphPrompt = this.buildRalphPrompt(config);
+
+    // Start the loop
+    this.runRalphLoop(runningAgent, ralphPrompt, config);
+
+    return ralphState;
+  }
+
+  private buildRalphPrompt(config: RalphLoopConfig): string {
+    const basePrompt = config.prompt;
+    const completionInstruction = `
+
+IMPORTANT: When you have completed the task successfully, output exactly:
+<promise>${config.completionPromise}</promise>
+
+This signals that the autonomous loop should stop. Only output this when you are confident the task is fully complete.
+
+${config.systemPromptAddition || ""}`;
+
+    return basePrompt + completionInstruction;
+  }
+
+  private async runRalphLoop(
+    runningAgent: RunningAgent,
+    prompt: string,
+    config: RalphLoopConfig
+  ): Promise<void> {
+    const { agent } = runningAgent;
+
+    while (
+      runningAgent.ralphLoopActive &&
+      !runningAgent.ralphCancelled &&
+      agent.ralph_state &&
+      !agent.ralph_state.completionDetected &&
+      agent.ralph_state.currentIteration < agent.ralph_state.maxIterations
+    ) {
+      // Increment iteration
+      agent.ralph_state.currentIteration++;
+
+      // Emit iteration event
+      this.emit("ralph:loop_iteration", {
+        agent_id: agent.id,
+        state: agent.ralph_state,
+      });
+
+      // Add iteration marker message
+      const iterationMessage: AgentMessage = {
+        id: uuidv4(),
+        message_type: "system",
+        content: `[Ralph Loop] Iteration ${agent.ralph_state.currentIteration}/${agent.ralph_state.maxIterations}`,
+        timestamp: new Date().toISOString(),
+      };
+      agent.messages.push(iterationMessage);
+      this.emit("agent:message", { agent_id: agent.id, message: iterationMessage });
+
+      try {
+        // Send the prompt and wait for completion
+        if (agent.agent_type === "claude-code") {
+          await this.runRalphIterationClaude(runningAgent, prompt);
+        } else {
+          await this.runRalphIterationCodex(runningAgent, prompt);
+        }
+
+        // Check if completion promise was detected in recent messages
+        const recentMessages = agent.messages.slice(-10);
+        for (const msg of recentMessages) {
+          if (msg.content.includes(`<promise>${config.completionPromise}</promise>`)) {
+            agent.ralph_state.completionDetected = true;
+            break;
+          }
+        }
+
+        // Update last iteration summary
+        const lastAssistantMsg = [...agent.messages].reverse().find(m => m.message_type === "assistant");
+        if (lastAssistantMsg) {
+          agent.ralph_state.lastIterationSummary = lastAssistantMsg.content.slice(0, 500);
+        }
+
+      } catch (error) {
+        agent.ralph_state.errorCount++;
+
+        const errorMessage: AgentMessage = {
+          id: uuidv4(),
+          message_type: "error",
+          content: `[Ralph Loop] Error in iteration ${agent.ralph_state.currentIteration}: ${(error as Error).message}`,
+          timestamp: new Date().toISOString(),
+        };
+        agent.messages.push(errorMessage);
+        this.emit("agent:message", { agent_id: agent.id, message: errorMessage });
+
+        this.emit("ralph:loop_error", {
+          agent_id: agent.id,
+          state: agent.ralph_state,
+          error: (error as Error).message,
+        });
+
+        // Continue on error if configured
+        if (!config.continueOnError) {
+          break;
+        }
+      }
+
+      // Wait between iterations
+      if (!agent.ralph_state.completionDetected && !runningAgent.ralphCancelled) {
+        await this.sleep(config.iterationDelay || 1000);
+      }
+    }
+
+    // Determine completion reason
+    let reason: "completion_detected" | "max_iterations" | "cancelled" | "error" = "completion_detected";
+    if (runningAgent.ralphCancelled) {
+      reason = "cancelled";
+    } else if (agent.ralph_state && agent.ralph_state.currentIteration >= agent.ralph_state.maxIterations) {
+      reason = "max_iterations";
+    } else if (agent.ralph_state && agent.ralph_state.errorCount > 0 && !config.continueOnError) {
+      reason = "error";
+    }
+
+    // Mark loop as complete
+    runningAgent.ralphLoopActive = false;
+    if (agent.ralph_state) {
+      agent.ralph_state.active = false;
+    }
+
+    // Emit completion event
+    this.emit("ralph:loop_completed", {
+      agent_id: agent.id,
+      state: agent.ralph_state,
+      reason,
+    });
+
+    // Add completion message
+    const completionMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: `[Ralph Loop] Completed after ${agent.ralph_state?.currentIteration || 0} iterations. Reason: ${reason}`,
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(completionMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: completionMessage });
+  }
+
+  private async runRalphIterationClaude(
+    runningAgent: RunningAgent,
+    prompt: string
+  ): Promise<void> {
+    const { agent } = runningAgent;
+
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    agent.status = "running";
+    this.emit("agent:status", { agent_id: agent.id, status: "running" });
+
+    const result = query({
+      prompt,
+      options: {
+        cwd: agent.working_dir,
+        resume: runningAgent.sessionId,
+        abortController: runningAgent.abortController,
+        hooks: {
+          PostToolUse: [
+            {
+              hooks: [
+                async (input: any) => {
+                  const toolMessage: AgentMessage = {
+                    id: uuidv4(),
+                    message_type: "tool",
+                    content: JSON.stringify(input, null, 2),
+                    timestamp: new Date().toISOString(),
+                    tool_name: input.tool_name,
+                    tool_input: input.tool_input,
+                    tool_use_id: input.tool_use_id,
+                  };
+                  agent.messages.push(toolMessage);
+                  this.emit("agent:message", {
+                    agent_id: agent.id,
+                    message: toolMessage,
+                  });
+
+                  if (["Edit", "Write"].includes(input.tool_name)) {
+                    const filePath = (input.tool_input as { file_path?: string })
+                      ?.file_path;
+                    if (filePath) {
+                      await this.trackCodeChange(runningAgent, filePath);
+                    }
+                  }
+
+                  return {};
+                },
+              ],
+            },
+          ],
+          Stop: [
+            {
+              hooks: [
+                async () => {
+                  agent.status = "idle";
+                  this.emit("agent:status", {
+                    agent_id: agent.id,
+                    status: "idle",
+                  });
+                  agent.git_info = await this.fetchGitInfo(runningAgent.git);
+                  this.emit("agent:git", {
+                    agent_id: agent.id,
+                    git_info: agent.git_info,
+                  });
+                  return {};
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    for await (const sdkMsg of result) {
+      const msg = sdkMsg as any;
+      if (msg.type === "assistant") {
+        const assistantMessage: AgentMessage = {
+          id: msg.uuid || uuidv4(),
+          message_type: "assistant",
+          content: this.extractTextContent(msg.message),
+          timestamp: new Date().toISOString(),
+        };
+        agent.messages.push(assistantMessage);
+        this.emit("agent:message", {
+          agent_id: agent.id,
+          message: assistantMessage,
+        });
+      } else if (msg.type === "result") {
+        agent.status = "idle";
+        this.emit("agent:status", { agent_id: agent.id, status: "idle" });
+      }
+    }
+
+    this.updateSessionActivity(runningAgent.sessionId!);
+  }
+
+  private async runRalphIterationCodex(
+    runningAgent: RunningAgent,
+    prompt: string
+  ): Promise<void> {
+    const { agent } = runningAgent;
+
+    agent.status = "running";
+    this.emit("agent:status", { agent_id: agent.id, status: "running" });
+
+    if (runningAgent.codexThread) {
+      const result = await (runningAgent.codexThread as { run: (p: string) => Promise<unknown> }).run(prompt);
+      this.processCodexResult(runningAgent, result);
+    }
+
+    agent.status = "idle";
+    this.emit("agent:status", { agent_id: agent.id, status: "idle" });
+
+    agent.git_info = await this.fetchGitInfo(runningAgent.git);
+    this.emit("agent:git", { agent_id: agent.id, git_info: agent.git_info });
+
+    this.updateSessionActivity(runningAgent.sessionId!);
+  }
+
+  cancelRalphLoop(agentId: string): boolean {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent || !runningAgent.ralphLoopActive) return false;
+
+    runningAgent.ralphCancelled = true;
+
+    const { agent } = runningAgent;
+    const cancelMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "system",
+      content: "[Ralph Loop] Cancellation requested",
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(cancelMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: cancelMessage });
+
+    return true;
+  }
+
+  getRalphState(agentId: string): RalphLoopState | null {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return null;
+
+    return runningAgent.agent.ralph_state || null;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }
