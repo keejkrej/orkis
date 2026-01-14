@@ -9,9 +9,21 @@ import type {
   Agent,
   AgentMessage,
   Plan,
+  PlanTask,
   GitInfo,
   CodeChange,
+  ToolActivity,
+  Session,
+  PendingInputRequest,
+  MCPServerConfig,
+  MCPTool,
+  ModelInfo,
+  AgentStatus,
 } from "./types";
+
+// =============================================================================
+// Running Agent State
+// =============================================================================
 
 interface RunningAgent {
   agent: Agent;
@@ -19,13 +31,102 @@ interface RunningAgent {
   abortController?: AbortController;
   git: SimpleGit;
   planWatcher?: fs.FSWatcher;
+
+  // Claude Code specific
+  claudeClient?: unknown;
+  sessionId?: string;
+
+  // Codex specific
+  codexClient?: unknown;
+  codexThread?: unknown;
+  threadId?: string;
+
+  // Pending input resolver
+  inputResolver?: (response: string) => void;
+
+  // Active MCP servers
+  mcpServers?: Map<string, MCPServerConfig>;
 }
+
+// =============================================================================
+// Session Storage
+// =============================================================================
+
+interface StoredSession {
+  id: string;
+  agent_id: string;
+  agent_type: "claude-code" | "codex";
+  created_at: string;
+  last_activity: string;
+  messages_count: number;
+  working_dir: string;
+  config: AgentConfig;
+}
+
+// =============================================================================
+// Agent Manager
+// =============================================================================
 
 export class AgentManager extends EventEmitter {
   private agents: Map<string, RunningAgent> = new Map();
+  private sessions: Map<string, StoredSession> = new Map();
+  private sessionsDir: string;
+
+  constructor() {
+    super();
+    // Store sessions in user's home directory
+    this.sessionsDir = path.join(
+      process.env.HOME || process.env.USERPROFILE || ".",
+      ".orkis",
+      "sessions"
+    );
+    this.ensureSessionsDir();
+    this.loadSessions();
+  }
+
+  private ensureSessionsDir(): void {
+    if (!fs.existsSync(this.sessionsDir)) {
+      fs.mkdirSync(this.sessionsDir, { recursive: true });
+    }
+  }
+
+  private loadSessions(): void {
+    try {
+      const files = fs.readdirSync(this.sessionsDir);
+      for (const file of files) {
+        if (file.endsWith(".json")) {
+          const content = fs.readFileSync(
+            path.join(this.sessionsDir, file),
+            "utf-8"
+          );
+          const session: StoredSession = JSON.parse(content);
+          this.sessions.set(session.id, session);
+        }
+      }
+    } catch {
+      // Sessions dir doesn't exist or is empty
+    }
+  }
+
+  private saveSession(session: StoredSession): void {
+    const filePath = path.join(this.sessionsDir, `${session.id}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(session, null, 2));
+  }
+
+  private deleteSessionFile(sessionId: string): void {
+    const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  }
+
+  // ===========================================================================
+  // Agent Lifecycle
+  // ===========================================================================
 
   async startAgent(config: AgentConfig): Promise<Agent> {
     const id = uuidv4();
+    const sessionId = uuidv4();
     const git = simpleGit(config.working_dir);
 
     const agent: Agent = {
@@ -38,6 +139,9 @@ export class AgentManager extends EventEmitter {
       plans: [],
       messages: [],
       code_changes: [],
+      tool_activities: [],
+      session_id: sessionId,
+      config,
     };
 
     // Get initial git info
@@ -46,6 +150,8 @@ export class AgentManager extends EventEmitter {
     const runningAgent: RunningAgent = {
       agent,
       git,
+      sessionId,
+      mcpServers: new Map(),
     };
 
     this.agents.set(id, runningAgent);
@@ -60,12 +166,36 @@ export class AgentManager extends EventEmitter {
       await this.startCodex(runningAgent, config);
     }
 
+    // Store session
+    const storedSession: StoredSession = {
+      id: sessionId,
+      agent_id: id,
+      agent_type: config.agent_type,
+      created_at: agent.started_at,
+      last_activity: agent.started_at,
+      messages_count: 0,
+      working_dir: config.working_dir,
+      config,
+    };
+    this.sessions.set(sessionId, storedSession);
+    this.saveSession(storedSession);
+
+    // Emit session created event
+    this.emit("agent:session_created", {
+      agent_id: id,
+      session: this.toSession(storedSession),
+    });
+
     return agent;
   }
 
+  // ===========================================================================
+  // Claude Code Implementation
+  // ===========================================================================
+
   private async startClaudeCode(
     runningAgent: RunningAgent,
-    config: AgentConfig,
+    config: AgentConfig
   ): Promise<void> {
     const { agent } = runningAgent;
 
@@ -80,9 +210,10 @@ export class AgentManager extends EventEmitter {
 
   private async startClaudeCodeWithSdk(
     runningAgent: RunningAgent,
-    config: AgentConfig,
+    config: AgentConfig
   ): Promise<void> {
     const { agent } = runningAgent;
+    const claudeConfig = config.claude_config || {};
 
     try {
       const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -93,84 +224,191 @@ export class AgentManager extends EventEmitter {
       const abortController = new AbortController();
       runningAgent.abortController = abortController;
 
+      // Build SDK options
+      const sdkOptions: Record<string, unknown> = {
+        cwd: config.working_dir,
+        abortController,
+        model: config.model || claudeConfig.model,
+      };
+
+      // System prompt
+      if (claudeConfig.systemPrompt) {
+        sdkOptions.systemPrompt = claudeConfig.systemPrompt;
+      }
+
+      // Max turns
+      if (claudeConfig.maxTurns) {
+        sdkOptions.maxTurns = claudeConfig.maxTurns;
+      }
+
+      // Allowed tools
+      if (claudeConfig.allowedTools && claudeConfig.allowedTools.length > 0) {
+        sdkOptions.allowedTools = claudeConfig.allowedTools;
+      }
+
+      // Permission mode
+      if (claudeConfig.permissionMode) {
+        sdkOptions.permissionMode = claudeConfig.permissionMode;
+      }
+
+      // MCP servers
+      if (claudeConfig.mcpServers) {
+        sdkOptions.mcpServers = claudeConfig.mcpServers;
+        // Track MCP servers
+        for (const [name, serverConfig] of Object.entries(
+          claudeConfig.mcpServers
+        )) {
+          runningAgent.mcpServers?.set(name, serverConfig);
+        }
+      }
+
+      // Custom subagents
+      if (claudeConfig.agents) {
+        sdkOptions.agents = claudeConfig.agents;
+      }
+
+      // Session resume
+      if (claudeConfig.resume) {
+        sdkOptions.resume = claudeConfig.resume;
+        runningAgent.sessionId = claudeConfig.resume;
+        agent.session_id = claudeConfig.resume;
+      }
+
+      // Settings sources
+      if (claudeConfig.settingSources) {
+        sdkOptions.settingSources = claudeConfig.settingSources;
+      }
+
+      // Context options
+      if (claudeConfig.contextWindowFraction) {
+        sdkOptions.contextWindowFraction = claudeConfig.contextWindowFraction;
+      }
+      if (claudeConfig.maxContextTokens) {
+        sdkOptions.maxContextTokens = claudeConfig.maxContextTokens;
+      }
+
+      // Build hooks with our tracking hooks
+      const hooks: Record<string, unknown[]> = {};
+
+      // PreToolUse hook for tracking and validation
+      hooks.PreToolUse = [
+        {
+          hooks: [
+            async (input: any) => {
+              const activity: ToolActivity = {
+                id: uuidv4(),
+                tool_name: input.tool_name,
+                tool_input: input.tool_input,
+                status: "running",
+                started_at: new Date().toISOString(),
+              };
+              agent.tool_activities.push(activity);
+              this.emit("agent:tool_start", { agent_id: agent.id, activity });
+              return {};
+            },
+          ],
+        },
+      ];
+
+      // PostToolUse hook for tracking results
+      hooks.PostToolUse = [
+        {
+          hooks: [
+            async (input: any) => {
+              // Find and update the activity
+              const activity = agent.tool_activities.find(
+                (a) => a.tool_name === input.tool_name && a.status === "running"
+              );
+              if (activity) {
+                activity.status = "completed";
+                activity.completed_at = new Date().toISOString();
+                activity.duration_ms =
+                  new Date(activity.completed_at).getTime() -
+                  new Date(activity.started_at).getTime();
+                this.emit("agent:tool_end", { agent_id: agent.id, activity });
+              }
+
+              // Track message
+              const message: AgentMessage = {
+                id: uuidv4(),
+                message_type: "tool",
+                content: JSON.stringify(input, null, 2),
+                timestamp: new Date().toISOString(),
+                tool_name: input.tool_name,
+                tool_input: input.tool_input,
+                tool_use_id: input.tool_use_id,
+              };
+              agent.messages.push(message);
+              this.emit("agent:message", { agent_id: agent.id, message });
+
+              // Track code changes
+              if (["Edit", "Write"].includes(input.tool_name)) {
+                const filePath = (input.tool_input as { file_path?: string })
+                  ?.file_path;
+                if (filePath) {
+                  await this.trackCodeChange(runningAgent, filePath);
+                }
+              }
+
+              // Update session
+              this.updateSessionActivity(runningAgent.sessionId!);
+
+              return {};
+            },
+          ],
+        },
+      ];
+
+      // Stop hook
+      hooks.Stop = [
+        {
+          hooks: [
+            async () => {
+              agent.status = "idle";
+              this.emit("agent:status", { agent_id: agent.id, status: "idle" });
+              // Refresh git info
+              agent.git_info = await this.fetchGitInfo(runningAgent.git);
+              this.emit("agent:git", {
+                agent_id: agent.id,
+                git_info: agent.git_info,
+              });
+              return {};
+            },
+          ],
+        },
+      ];
+
+      // Merge user hooks with our tracking hooks
+      if (claudeConfig.hooks) {
+        for (const [event, matchers] of Object.entries(claudeConfig.hooks)) {
+          if (hooks[event]) {
+            hooks[event] = [...hooks[event], ...(matchers as unknown[])];
+          } else {
+            hooks[event] = matchers as unknown[];
+          }
+        }
+      }
+
+      sdkOptions.hooks = hooks;
+
       // Run the agent query
       const result = query({
         prompt: config.prompt || "Hello",
-        options: {
-          cwd: config.working_dir,
-          abortController,
-          model: config.model,
-          hooks: {
-            PostToolUse: [
-              {
-                hooks: [
-                  async (input: any) => {
-                    // Track tool usage
-                    // The SDK provides tool_name and tool_input in the hook input
-                    const toolInput = input as {
-                      tool_name: string;
-                      tool_input: unknown;
-                    };
-                    const message: AgentMessage = {
-                      id: uuidv4(),
-                      message_type: "tool",
-                      content: JSON.stringify(input, null, 2),
-                      timestamp: new Date().toISOString(),
-                      tool_name: toolInput.tool_name,
-                      tool_input: toolInput.tool_input,
-                    };
-                    agent.messages.push(message);
-                    this.emit("agent:message", {
-                      agent_id: agent.id,
-                      message,
-                    });
-
-                    // Check for code changes on Edit/Write tools
-                    if (["Edit", "Write"].includes(toolInput.tool_name)) {
-                      const filePath = (
-                        toolInput.tool_input as { file_path?: string }
-                      ).file_path;
-                      if (filePath) {
-                        await this.trackCodeChange(runningAgent, filePath);
-                      }
-                    }
-
-                    return { continue: true };
-                  },
-                ],
-              },
-            ],
-            Stop: [
-              {
-                hooks: [
-                  async () => {
-                    agent.status = "idle";
-                    this.emit("agent:status", {
-                      agent_id: agent.id,
-                      status: "idle",
-                    });
-                    // Refresh git info when agent stops
-                    agent.git_info = await this.fetchGitInfo(runningAgent.git);
-                    this.emit("agent:git", {
-                      agent_id: agent.id,
-                      git_info: agent.git_info,
-                    });
-                    return { continue: true };
-                  },
-                ],
-              },
-            ],
-          },
-        },
+        options: sdkOptions,
       });
 
       // Process messages from the agent
       for await (const message of result) {
-        if (message.type === "assistant") {
+        const msg = message as any;
+        if (msg.type === "system" && msg.subtype === "init") {
+          // Capture session ID
+          runningAgent.sessionId = msg.session_id;
+          agent.session_id = msg.session_id;
+        } else if (msg.type === "assistant") {
           const assistantMessage: AgentMessage = {
-            id: message.uuid,
+            id: msg.uuid || uuidv4(),
             message_type: "assistant",
-            content: this.extractTextContent(message.message),
+            content: this.extractTextContent(msg.message),
             timestamp: new Date().toISOString(),
           };
           agent.messages.push(assistantMessage);
@@ -178,7 +416,8 @@ export class AgentManager extends EventEmitter {
             agent_id: agent.id,
             message: assistantMessage,
           });
-        } else if (message.type === "result") {
+          this.updateSessionActivity(runningAgent.sessionId!);
+        } else if (msg.type === "result") {
           agent.status = "idle";
           this.emit("agent:status", { agent_id: agent.id, status: "idle" });
         }
@@ -199,14 +438,20 @@ export class AgentManager extends EventEmitter {
         .join("\n");
     }
     if (message && typeof message === "object" && "content" in message) {
-      return this.extractTextContent((message as { content: unknown }).content);
+      return this.extractTextContent(
+        (message as { content: unknown }).content
+      );
     }
     return JSON.stringify(message);
   }
 
+  // ===========================================================================
+  // Codex Implementation
+  // ===========================================================================
+
   private async startCodex(
     runningAgent: RunningAgent,
-    config: AgentConfig,
+    config: AgentConfig
   ): Promise<void> {
     const { agent } = runningAgent;
 
@@ -221,9 +466,10 @@ export class AgentManager extends EventEmitter {
 
   private async startCodexWithSdk(
     runningAgent: RunningAgent,
-    config: AgentConfig,
+    config: AgentConfig
   ): Promise<void> {
     const { agent } = runningAgent;
+    const codexConfig = config.codex_config || {};
 
     try {
       const { Codex } = await import("@openai/codex-sdk");
@@ -231,66 +477,62 @@ export class AgentManager extends EventEmitter {
       agent.status = "running";
       this.emit("agent:status", { agent_id: agent.id, status: "running" });
 
-      const codex = new Codex();
-      const thread = codex.startThread();
+      // Build Codex options
+      const codexOptions: Record<string, unknown> = {};
 
-      const prompt = config.prompt || "Hello";
-      const result = await thread.run(prompt);
-
-      console.log(result);
-
-      // Parse the result if it's a structured response
-      let content: string;
-      if (typeof result === "string") {
-        content = result;
-      } else if (result && typeof result === "object") {
-        // Handle structured response with items, finalResponse, etc.
-        if (result.items && Array.isArray(result.items)) {
-          // Send each item as a separate message
-          for (const item of result.items) {
-            if (item.type === "reasoning") {
-              const reasoningMessage: AgentMessage = {
-                id: uuidv4(),
-                message_type: "system",
-                content: item.text,
-                timestamp: new Date().toISOString(),
-              };
-              agent.messages.push(reasoningMessage);
-              this.emit("agent:message", {
-                agent_id: agent.id,
-                message: reasoningMessage,
-              });
-            } else if (item.type === "agent_message") {
-              const agentMessage: AgentMessage = {
-                id: uuidv4(),
-                message_type: "assistant",
-                content: item.text,
-                timestamp: new Date().toISOString(),
-              };
-              agent.messages.push(agentMessage);
-              this.emit("agent:message", {
-                agent_id: agent.id,
-                message: agentMessage,
-              });
-            }
-          }
-          // Use finalResponse as the main response if available
-          content = result.finalResponse || JSON.stringify(result);
-        } else {
-          content = JSON.stringify(result);
-        }
-      } else {
-        content = String(result);
+      if (config.model || codexConfig.model) {
+        codexOptions.model = config.model || codexConfig.model;
       }
 
-      const message: AgentMessage = {
-        id: uuidv4(),
-        message_type: "assistant",
-        content,
-        timestamp: new Date().toISOString(),
-      };
-      agent.messages.push(message);
-      this.emit("agent:message", { agent_id: agent.id, message });
+      if (codexConfig.approvalMode) {
+        codexOptions.approvalMode = codexConfig.approvalMode;
+      }
+
+      if (codexConfig.sandboxMode) {
+        codexOptions.sandboxMode = codexConfig.sandboxMode;
+      }
+
+      if (codexConfig.webSearch) {
+        codexOptions.webSearch = codexConfig.webSearch;
+      }
+
+      if (codexConfig.fullAuto) {
+        codexOptions.fullAuto = codexConfig.fullAuto;
+      }
+
+      if (codexConfig.additionalDirs && codexConfig.additionalDirs.length > 0) {
+        codexOptions.additionalDirs = codexConfig.additionalDirs;
+      }
+
+      // Create Codex instance
+      const codex = new Codex(codexOptions);
+      runningAgent.codexClient = codex;
+
+      // Start or resume thread
+      let thread: unknown;
+      if (codexConfig.resumeThreadId) {
+        thread = codex.resumeThread(codexConfig.resumeThreadId);
+        runningAgent.threadId = codexConfig.resumeThreadId;
+        agent.thread_id = codexConfig.resumeThreadId;
+      } else {
+        thread = codex.startThread();
+        // Thread ID will be available after first run
+      }
+      runningAgent.codexThread = thread;
+
+      const prompt = config.prompt || "Hello";
+
+      // Run the thread with the prompt
+      const result = await (thread as { run: (p: string) => Promise<unknown> }).run(prompt);
+
+      // Extract thread ID if available
+      if ((thread as { id?: string }).id) {
+        runningAgent.threadId = (thread as { id: string }).id;
+        agent.thread_id = runningAgent.threadId;
+      }
+
+      // Process the result
+      this.processCodexResult(runningAgent, result);
 
       agent.status = "idle";
       this.emit("agent:status", { agent_id: agent.id, status: "idle" });
@@ -298,10 +540,311 @@ export class AgentManager extends EventEmitter {
       // Refresh git info
       agent.git_info = await this.fetchGitInfo(runningAgent.git);
       this.emit("agent:git", { agent_id: agent.id, git_info: agent.git_info });
+
+      // Update session
+      this.updateSessionActivity(runningAgent.sessionId!);
     } catch (error) {
       throw error;
     }
   }
+
+  private processCodexResult(runningAgent: RunningAgent, result: unknown): void {
+    const { agent } = runningAgent;
+
+    if (typeof result === "string") {
+      const message: AgentMessage = {
+        id: uuidv4(),
+        message_type: "assistant",
+        content: result,
+        timestamp: new Date().toISOString(),
+      };
+      agent.messages.push(message);
+      this.emit("agent:message", { agent_id: agent.id, message });
+      return;
+    }
+
+    if (result && typeof result === "object") {
+      const typedResult = result as {
+        items?: Array<{ type: string; text?: string; tool?: string; input?: unknown; output?: unknown }>;
+        finalResponse?: string;
+      };
+
+      // Process items if available
+      if (typedResult.items && Array.isArray(typedResult.items)) {
+        for (const item of typedResult.items) {
+          if (item.type === "reasoning") {
+            const reasoningMessage: AgentMessage = {
+              id: uuidv4(),
+              message_type: "system",
+              content: item.text || "",
+              timestamp: new Date().toISOString(),
+            };
+            agent.messages.push(reasoningMessage);
+            this.emit("agent:message", {
+              agent_id: agent.id,
+              message: reasoningMessage,
+            });
+          } else if (item.type === "agent_message") {
+            const agentMessage: AgentMessage = {
+              id: uuidv4(),
+              message_type: "assistant",
+              content: item.text || "",
+              timestamp: new Date().toISOString(),
+            };
+            agent.messages.push(agentMessage);
+            this.emit("agent:message", {
+              agent_id: agent.id,
+              message: agentMessage,
+            });
+          } else if (item.type === "tool_use") {
+            const activity: ToolActivity = {
+              id: uuidv4(),
+              tool_name: item.tool || "unknown",
+              tool_input: item.input,
+              tool_result: item.output,
+              status: "completed",
+              started_at: new Date().toISOString(),
+              completed_at: new Date().toISOString(),
+            };
+            agent.tool_activities.push(activity);
+            this.emit("agent:tool_end", { agent_id: agent.id, activity });
+
+            const toolMessage: AgentMessage = {
+              id: uuidv4(),
+              message_type: "tool",
+              content: JSON.stringify({ tool: item.tool, input: item.input, output: item.output }, null, 2),
+              timestamp: new Date().toISOString(),
+              tool_name: item.tool,
+              tool_input: item.input,
+              tool_result: item.output,
+            };
+            agent.messages.push(toolMessage);
+            this.emit("agent:message", { agent_id: agent.id, message: toolMessage });
+          }
+        }
+      }
+
+      // Process final response
+      if (typedResult.finalResponse) {
+        const message: AgentMessage = {
+          id: uuidv4(),
+          message_type: "assistant",
+          content: typedResult.finalResponse,
+          timestamp: new Date().toISOString(),
+        };
+        agent.messages.push(message);
+        this.emit("agent:message", { agent_id: agent.id, message });
+      } else if (!typedResult.items) {
+        // Fallback: stringify the entire result
+        const message: AgentMessage = {
+          id: uuidv4(),
+          message_type: "assistant",
+          content: JSON.stringify(result, null, 2),
+          timestamp: new Date().toISOString(),
+        };
+        agent.messages.push(message);
+        this.emit("agent:message", { agent_id: agent.id, message });
+      }
+    }
+  }
+
+  // ===========================================================================
+  // Interactive Messaging
+  // ===========================================================================
+
+  async sendMessage(agentId: string, message: string): Promise<void> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return;
+
+    const { agent } = runningAgent;
+
+    // Add user message
+    const userMessage: AgentMessage = {
+      id: uuidv4(),
+      message_type: "user",
+      content: message,
+      timestamp: new Date().toISOString(),
+    };
+    agent.messages.push(userMessage);
+    this.emit("agent:message", { agent_id: agent.id, message: userMessage });
+
+    // Send to the appropriate agent
+    if (agent.agent_type === "claude-code") {
+      await this.sendClaudeCodeMessage(runningAgent, message);
+    } else {
+      await this.sendCodexMessage(runningAgent, message);
+    }
+  }
+
+  private async sendClaudeCodeMessage(
+    runningAgent: RunningAgent,
+    message: string
+  ): Promise<void> {
+    const { agent } = runningAgent;
+
+    try {
+      const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+      agent.status = "running";
+      this.emit("agent:status", { agent_id: agent.id, status: "running" });
+
+      // Resume the session and send the new message
+      const result = query({
+        prompt: message,
+        options: {
+          cwd: agent.working_dir,
+          resume: runningAgent.sessionId,
+          abortController: runningAgent.abortController,
+          hooks: {
+            PostToolUse: [
+              {
+                hooks: [
+                  async (input: any) => {
+                    const toolMessage: AgentMessage = {
+                      id: uuidv4(),
+                      message_type: "tool",
+                      content: JSON.stringify(input, null, 2),
+                      timestamp: new Date().toISOString(),
+                      tool_name: input.tool_name,
+                      tool_input: input.tool_input,
+                      tool_use_id: input.tool_use_id,
+                    };
+                    agent.messages.push(toolMessage);
+                    this.emit("agent:message", {
+                      agent_id: agent.id,
+                      message: toolMessage,
+                    });
+
+                    if (["Edit", "Write"].includes(input.tool_name)) {
+                      const filePath = (input.tool_input as { file_path?: string })
+                        ?.file_path;
+                      if (filePath) {
+                        await this.trackCodeChange(runningAgent, filePath);
+                      }
+                    }
+
+                    return {};
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  async () => {
+                    agent.status = "idle";
+                    this.emit("agent:status", {
+                      agent_id: agent.id,
+                      status: "idle",
+                    });
+                    agent.git_info = await this.fetchGitInfo(runningAgent.git);
+                    this.emit("agent:git", {
+                      agent_id: agent.id,
+                      git_info: agent.git_info,
+                    });
+                    return {};
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      for await (const sdkMsg of result) {
+        const msg = sdkMsg as any;
+        if (msg.type === "assistant") {
+          const assistantMessage: AgentMessage = {
+            id: msg.uuid || uuidv4(),
+            message_type: "assistant",
+            content: this.extractTextContent(msg.message),
+            timestamp: new Date().toISOString(),
+          };
+          agent.messages.push(assistantMessage);
+          this.emit("agent:message", {
+            agent_id: agent.id,
+            message: assistantMessage,
+          });
+        } else if (msg.type === "result") {
+          agent.status = "idle";
+          this.emit("agent:status", { agent_id: agent.id, status: "idle" });
+        }
+      }
+
+      this.updateSessionActivity(runningAgent.sessionId!);
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        agent.status = "error";
+        this.emit("agent:status", { agent_id: agent.id, status: "error" });
+        throw error;
+      }
+    }
+  }
+
+  private async sendCodexMessage(
+    runningAgent: RunningAgent,
+    message: string
+  ): Promise<void> {
+    const { agent } = runningAgent;
+
+    try {
+      agent.status = "running";
+      this.emit("agent:status", { agent_id: agent.id, status: "running" });
+
+      // Continue the thread with the new message
+      if (runningAgent.codexThread) {
+        const result = await (runningAgent.codexThread as { run: (p: string) => Promise<unknown> }).run(message);
+        this.processCodexResult(runningAgent, result);
+      }
+
+      agent.status = "idle";
+      this.emit("agent:status", { agent_id: agent.id, status: "idle" });
+
+      agent.git_info = await this.fetchGitInfo(runningAgent.git);
+      this.emit("agent:git", { agent_id: agent.id, git_info: agent.git_info });
+
+      this.updateSessionActivity(runningAgent.sessionId!);
+    } catch (error) {
+      agent.status = "error";
+      this.emit("agent:status", { agent_id: agent.id, status: "error" });
+      throw error;
+    }
+  }
+
+  // ===========================================================================
+  // Input Response Handling
+  // ===========================================================================
+
+  async respondToInput(
+    agentId: string,
+    inputId: string,
+    response: string
+  ): Promise<void> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return;
+
+    const { agent } = runningAgent;
+
+    // Clear pending input
+    agent.pending_input = undefined;
+
+    // Emit response event
+    this.emit("agent:input_response", {
+      agent_id: agent.id,
+      input_id: inputId,
+      response,
+    });
+
+    // Resolve the input if there's a resolver
+    if (runningAgent.inputResolver) {
+      runningAgent.inputResolver(response);
+      runningAgent.inputResolver = undefined;
+    }
+  }
+
+  // ===========================================================================
+  // Agent Lifecycle Management
+  // ===========================================================================
 
   async stopAgent(agentId: string): Promise<void> {
     const runningAgent = this.agents.get(agentId);
@@ -341,44 +884,137 @@ export class AgentManager extends EventEmitter {
     return this.agents.get(agentId)?.agent || null;
   }
 
-  async sendMessage(agentId: string, message: string): Promise<void> {
-    const runningAgent = this.agents.get(agentId);
-    if (!runningAgent) return;
+  // ===========================================================================
+  // Session Management
+  // ===========================================================================
 
-    const { agent, process } = runningAgent;
-
-    // Add user message
-    const userMessage: AgentMessage = {
-      id: uuidv4(),
-      message_type: "user",
-      content: message,
-      timestamp: new Date().toISOString(),
-    };
-    agent.messages.push(userMessage);
-    this.emit("agent:message", { agent_id: agent.id, message: userMessage });
-
-    // Send to agent via SDK if available
-    // Note: Actual implementation depends on SDK capabilities
-    // This is a placeholder for SDK-based messaging
+  listSessions(workingDir?: string): Session[] {
+    const sessions: Session[] = [];
+    for (const stored of this.sessions.values()) {
+      if (!workingDir || stored.working_dir === workingDir) {
+        sessions.push(this.toSession(stored));
+      }
+    }
+    return sessions.sort(
+      (a, b) =>
+        new Date(b.last_activity).getTime() -
+        new Date(a.last_activity).getTime()
+    );
   }
+
+  private toSession(stored: StoredSession): Session {
+    return {
+      id: stored.id,
+      agent_id: stored.agent_id,
+      created_at: stored.created_at,
+      last_activity: stored.last_activity,
+      messages_count: stored.messages_count,
+      working_dir: stored.working_dir,
+      can_resume: true,
+    };
+  }
+
+  private updateSessionActivity(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.last_activity = new Date().toISOString();
+      session.messages_count++;
+      this.saveSession(session);
+    }
+  }
+
+  async resumeSession(sessionId: string): Promise<Agent | null> {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return null;
+
+    // Start agent with resume option
+    const config: AgentConfig = {
+      ...stored.config,
+    };
+
+    if (stored.agent_type === "claude-code") {
+      config.claude_config = {
+        ...config.claude_config,
+        resume: sessionId,
+      };
+    } else {
+      config.codex_config = {
+        ...config.codex_config,
+        resumeThreadId: sessionId,
+      };
+    }
+
+    const agent = await this.startAgent(config);
+
+    this.emit("agent:session_resumed", {
+      agent_id: agent.id,
+      session: this.toSession(stored),
+    });
+
+    return agent;
+  }
+
+  async forkSession(sessionId: string, newName?: string): Promise<Agent | null> {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return null;
+
+    // Start a new agent with forked session (Claude Code only)
+    const config: AgentConfig = {
+      ...stored.config,
+      name: newName || `${stored.config.name} (fork)`,
+    };
+
+    if (stored.agent_type === "claude-code") {
+      config.claude_config = {
+        ...config.claude_config,
+        fork: sessionId,
+      };
+    }
+
+    return this.startAgent(config);
+  }
+
+  deleteSession(sessionId: string): boolean {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return false;
+
+    this.sessions.delete(sessionId);
+    this.deleteSessionFile(sessionId);
+    return true;
+  }
+
+  // ===========================================================================
+  // Git Operations
+  // ===========================================================================
 
   private async fetchGitInfo(git: SimpleGit): Promise<GitInfo> {
     try {
-      const [branch, status, log] = await Promise.all([
+      const [branch, status, log, remotes] = await Promise.all([
         git.branchLocal(),
         git.status(),
         git.log({ maxCount: 1 }),
+        git.getRemotes(true),
       ]);
+
+      const remote = remotes.length > 0 ? remotes[0] : undefined;
 
       return {
         branch: branch.current,
         uncommitted_changes: status.files.length,
+        staged_changes: status.staged.length,
+        untracked_files: status.not_added.length,
         last_commit: log.latest
           ? {
               hash: log.latest.hash,
               message: log.latest.message,
               author: log.latest.author_name,
               date: new Date(log.latest.date).toISOString(),
+            }
+          : undefined,
+        remote: remote
+          ? {
+              name: remote.name,
+              url: remote.refs.fetch || remote.refs.push || "",
             }
           : undefined,
       };
@@ -404,6 +1040,31 @@ export class AgentManager extends EventEmitter {
       return "";
     }
   }
+
+  async commitChanges(agentId: string, message: string): Promise<boolean> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    try {
+      await runningAgent.git.add(".");
+      await runningAgent.git.commit(message);
+
+      // Update git info
+      runningAgent.agent.git_info = await this.fetchGitInfo(runningAgent.git);
+      this.emit("agent:git", {
+        agent_id: agentId,
+        git_info: runningAgent.agent.git_info,
+      });
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ===========================================================================
+  // Plan Watching
+  // ===========================================================================
 
   private watchForPlans(runningAgent: RunningAgent): void {
     const { agent } = runningAgent;
@@ -432,7 +1093,7 @@ export class AgentManager extends EventEmitter {
               this.loadPlan(runningAgent, planPath);
             }
           }
-        },
+        }
       );
       runningAgent.planWatcher = watcher;
     } catch {
@@ -444,17 +1105,20 @@ export class AgentManager extends EventEmitter {
     try {
       const content = fs.readFileSync(planPath, "utf-8");
       const existingPlan = runningAgent.agent.plans.find(
-        (p) => p.file_path === planPath,
+        (p) => p.file_path === planPath
       );
 
       if (existingPlan) {
         existingPlan.content = content;
+        existingPlan.updated_at = new Date().toISOString();
+        existingPlan.tasks = this.parsePlanTasks(content);
       } else {
         const plan: Plan = {
           id: uuidv4(),
           content,
           file_path: planPath,
           created_at: new Date().toISOString(),
+          tasks: this.parsePlanTasks(content),
         };
         runningAgent.agent.plans.push(plan);
         this.emit("agent:plan", { agent_id: runningAgent.agent.id, plan });
@@ -464,24 +1128,51 @@ export class AgentManager extends EventEmitter {
     }
   }
 
+  private parsePlanTasks(content: string): PlanTask[] {
+    const tasks: PlanTask[] = [];
+    const lines = content.split("\n");
+
+    for (const line of lines) {
+      // Match markdown checkboxes: - [ ] task or - [x] task
+      const match = line.match(/^[-*]\s*\[([ xX])\]\s*(.+)$/);
+      if (match) {
+        const isCompleted = match[1].toLowerCase() === "x";
+        const taskContent = match[2].trim();
+        tasks.push({
+          id: uuidv4(),
+          content: taskContent,
+          status: isCompleted ? "completed" : "pending",
+        });
+      }
+    }
+
+    return tasks;
+  }
+
+  // ===========================================================================
+  // Code Change Tracking
+  // ===========================================================================
+
   private async trackCodeChange(
     runningAgent: RunningAgent,
-    filePath: string,
+    filePath: string
   ): Promise<void> {
     const { agent, git } = runningAgent;
 
     try {
-      // Get diff stats for this file
       const diff = await git.diff(["--stat", "--", filePath]);
       const match = diff.match(
-        /(\d+) insertions?\(\+\), (\d+) deletions?\(-\)/,
+        /(\d+) insertions?\(\+\)(?:, (\d+) deletions?\(-\))?/
       );
+
+      const existed = fs.existsSync(path.join(agent.working_dir, filePath));
 
       const change: CodeChange = {
         file_path: filePath,
         lines_added: match ? parseInt(match[1], 10) : 0,
-        lines_removed: match ? parseInt(match[2], 10) : 0,
+        lines_removed: match && match[2] ? parseInt(match[2], 10) : 0,
         timestamp: new Date().toISOString(),
+        change_type: existed ? "modified" : "created",
       };
 
       agent.code_changes.push(change);
@@ -493,5 +1184,132 @@ export class AgentManager extends EventEmitter {
     } catch {
       // Couldn't get diff stats
     }
+  }
+
+  // ===========================================================================
+  // MCP Server Management
+  // ===========================================================================
+
+  async addMCPServer(
+    agentId: string,
+    name: string,
+    config: MCPServerConfig
+  ): Promise<boolean> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    runningAgent.mcpServers?.set(name, config);
+    return true;
+  }
+
+  async removeMCPServer(agentId: string, name: string): Promise<boolean> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return false;
+
+    return runningAgent.mcpServers?.delete(name) || false;
+  }
+
+  async listMCPTools(agentId: string): Promise<MCPTool[]> {
+    const runningAgent = this.agents.get(agentId);
+    if (!runningAgent) return [];
+
+    // Return available MCP tools
+    // This would need actual MCP server communication in production
+    return [];
+  }
+
+  // ===========================================================================
+  // Available Tools and Models
+  // ===========================================================================
+
+  getAvailableTools(): string[] {
+    return [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "AskUserQuestion",
+      "Task",
+      "NotebookEdit",
+      "TodoWrite",
+      "KillShell",
+      "Skill",
+    ];
+  }
+
+  getAvailableModels(): ModelInfo[] {
+    return [
+      {
+        id: "claude-sonnet-4-20250514",
+        name: "Claude Sonnet 4",
+        provider: "anthropic",
+        context_window: 200000,
+        supports_images: true,
+        supports_tools: true,
+      },
+      {
+        id: "claude-opus-4-20250514",
+        name: "Claude Opus 4",
+        provider: "anthropic",
+        context_window: 200000,
+        supports_images: true,
+        supports_tools: true,
+      },
+      {
+        id: "claude-3-5-sonnet-20241022",
+        name: "Claude 3.5 Sonnet",
+        provider: "anthropic",
+        context_window: 200000,
+        supports_images: true,
+        supports_tools: true,
+      },
+      {
+        id: "gpt-5-codex",
+        name: "GPT-5 Codex",
+        provider: "openai",
+        context_window: 128000,
+        supports_images: true,
+        supports_tools: true,
+      },
+      {
+        id: "gpt-5",
+        name: "GPT-5",
+        provider: "openai",
+        context_window: 128000,
+        supports_images: true,
+        supports_tools: true,
+      },
+    ];
+  }
+
+  // ===========================================================================
+  // Configuration Validation
+  // ===========================================================================
+
+  validateConfig(config: AgentConfig): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    if (!config.name || config.name.trim() === "") {
+      errors.push("Agent name is required");
+    }
+
+    if (!config.working_dir || config.working_dir.trim() === "") {
+      errors.push("Working directory is required");
+    } else if (!fs.existsSync(config.working_dir)) {
+      errors.push(`Working directory does not exist: ${config.working_dir}`);
+    }
+
+    if (!["claude-code", "codex"].includes(config.agent_type)) {
+      errors.push(`Invalid agent type: ${config.agent_type}`);
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
   }
 }
